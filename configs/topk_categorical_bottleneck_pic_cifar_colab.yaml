@@ -11,7 +11,7 @@ model:
   # notebook sweep.
   num_latent_classes: 100
   topk: 5
-  latent_temperature: 1.0
+  latent_temperature: 0.2
   # null = linear latent->instance decoder. A small hidden layer can test a
   # slightly more flexible bottleneck, but keep it modest to avoid bypassing C.
   decoder_hidden_dim: null
