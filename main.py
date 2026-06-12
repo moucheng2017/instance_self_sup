@@ -58,6 +58,8 @@ def build_train_loader(args):
         "pseudo_supervised_net",
         "hierarchical_pseudo_supervised_net",
         "sigmoid_pseudo_supervised_net",
+        "low_rank_multitarget_pseudo_supervised_net",
+        "topk_categorical_bottleneck_pic_net",
         "hierarchical_balanced_vmf_self_labeling_net",
         "hierarchical_kway_vmf_ot_self_labeling_net",
     ):

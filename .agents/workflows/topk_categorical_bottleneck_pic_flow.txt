@@ -1,0 +1,178 @@
+Top-k Categorical Bottleneck PIC: Computational Flow
+====================================================
+
+Experiment files:
+- Model: models/topk_categorical_bottleneck_pic_net.py
+- Config: configs/topk_categorical_bottleneck_pic_cifar_colab.yaml
+- Notebook: notebooks/topk-categorical-bottleneck-pic-cifar10-sweep.ipynb
+
+
+Notation
+--------
+
+B = batch size, default 128
+N = number of source-pool instances, default 50,000 for CIFAR-10
+D = backbone feature dimension, 512 for resnet18
+C = number of latent categorical classes
+k = number of active latent classes per image
+
+
+Data Loader Output
+------------------
+
+PseudoSupervisedDataset returns:
+
+images:        [B, 3, 32, 32]
+pseudo_labels: [B]
+
+With B=128:
+
+images:        [128, 3, 32, 32]
+pseudo_labels: [128]
+
+Each pseudo_labels[b] is an image-index ID in [0, N-1].
+
+
+Forward Pass
+------------
+
+1. Backbone
+
+images [B, 3, 32, 32]
+  -> backbone
+features [B, D]
+
+With resnet18:
+
+images   [128, 3, 32, 32]
+features [128, 512]
+
+
+2. Latent categorical assigner
+
+features [B, D]
+  -> optional L2 normalize features
+  -> latent_class_assigner_matrix [D, C]
+latent_logits [B, C]
+
+Example C=100:
+
+features      [128, 512]
+assigner      [512, 100]
+latent_logits [128, 100]
+
+
+3. Gumbel-Top-k categorical sample
+
+latent_logits [B, C]
+  -> add Gumbel noise during training
+  -> softmax temperature tau
+  -> top-k straight-through sample
+
+Outputs:
+
+soft_probs       [B, C], rows sum to 1
+hard_assignments [B, C], rows sum to k
+assignments      [B, C], hard forward pass with soft gradients
+
+Example C=100,k=5:
+
+soft_probs       [128, 100]
+hard_assignments [128, 100], exactly 5 ones per row
+assignments      [128, 100]
+
+
+4. Optional column normalization
+
+assignments [B, C]
+  -> one-shot column normalization over the batch
+decoder_input [B, C]
+
+This rescales active columns toward equal batch mass while preserving total
+assignment mass. Empty columns remain zero. This is not iterative Sinkhorn
+normalization.
+
+
+5. Latent-to-instance decoder
+
+decoder_input [B, C]
+  -> linear decoder or shallow MLP
+instance_logits [B, N]
+
+Linear decoder shape:
+
+decoder weight [C, N] conceptually, implemented by nn.Linear(C, N)
+
+Example C=100,N=50000:
+
+decoder_input   [128, 100]
+instance_logits [128, 50000]
+
+
+Losses
+------
+
+Instance reconstruction / classification:
+
+instance_logits [B, N]
+pseudo_labels   [B]
+
+loss_instance = CE(instance_logits, pseudo_labels)
+
+
+Global latent usage balance:
+
+soft_probs [B, C]
+mean_probs = soft_probs.mean(dim=0) [C]
+
+loss_balance = KL(mean_probs || Uniform(C))
+
+This discourages collapse to a few latent categories.
+
+
+Per-sample entropy control:
+
+entropy = H(soft_probs[b]) for each sample
+
+loss_entropy = mean((entropy - target_entropy)^2)
+
+Default target_entropy is log(k), so the soft posterior roughly matches the
+intended top-k support size when this loss is enabled.
+
+
+Total loss:
+
+loss = loss_instance
+     + balance_weight * loss_balance
+     + entropy_weight * loss_entropy
+
+
+Diagnostics
+-----------
+
+acc:
+  Top-1 instance-ID accuracy from instance_logits.
+
+latent_perplexity:
+  exp(H(mean hard assignment usage)).
+  Measures how many latent categories are effectively used.
+
+latent_entropy:
+  Mean per-sample entropy of soft_probs.
+
+
+Why This Tests the Hypothesis
+-----------------------------
+
+PIC uses a direct high-capacity instance classifier:
+
+feature [B,D] -> instance logits [B,N]
+
+Top-k categorical bottleneck PIC restricts instance prediction through C latent
+categories:
+
+feature [B,D] -> top-k latent set [B,C] -> instance logits [B,N]
+
+Sweeping C and k controls the instance-prediction bottleneck capacity. If the
+kNN-linear gap grows as C/k grow, it supports the hypothesis that excessive
+instance-label capacity fragments semantic class geometry.

@@ -1,0 +1,204 @@
+Low-Rank Multi-Target Instance Supervision: Computational Flow
+==============================================================
+
+Experiment files:
+- Model: models/low_rank_multitarget_pseudo_supervised_net.py
+- Config: configs/low_rank_multitarget_cifar_colab.yaml
+- Notebook: notebooks/low-rank-multitarget-cifar10-sweep.ipynb
+
+
+Notation
+--------
+
+B = batch size, default 128 in the notebook/config
+N = number of source-pool instances, default 50,000 for CIFAR-10 train
+K = number of latent labels / target rank, swept in the notebook
+m = membership_size, default 5 except K=N baseline uses m=1
+D = backbone feature dimension, 512 for resnet18
+
+Example rank-sweep values:
+
+K = 100,   m = 5      overclustered/shared latent labels
+K = 500,   m = 5
+K = 1,000, m = 5
+K = 10,000,m = 5
+K = 50,000,m = 1      approximates ordinary instance supervision
+
+
+One-Time Target Construction
+----------------------------
+
+The model creates a fixed balanced membership table at initialization:
+
+memberships = build_balanced_memberships(
+    num_instances=N,
+    num_latent_classes=K,
+    membership_size=m,
+    seed=membership_seed,
+)
+
+Shape:
+
+memberships: [N, m]
+
+Meaning:
+
+memberships[i] = the m latent labels assigned to image-index instance i.
+
+For K=100 and m=5:
+
+instance i -> memberships[i] = [c1, c2, c3, c4, c5]
+where each c is an integer in [0, 99].
+
+The table is fixed. It is not learned, not refreshed, and not derived from the
+backbone. This keeps K as a controlled target-rank variable.
+
+
+Data Loader Output
+------------------
+
+PseudoSupervisedDataset returns one augmented image and one image-index label:
+
+images:        [B, 3, 32, 32]
+pseudo_labels: [B]
+
+With B=128:
+
+images:        [128, 3, 32, 32]
+pseudo_labels: [128]
+
+Each pseudo_labels[b] is an integer image-index ID in [0, N-1].
+
+
+Forward Pass
+------------
+
+1. Image batch through backbone
+
+images [B, 3, 32, 32]
+  -> backbone
+features [B, D]
+
+With B=128 and resnet18:
+
+images   [128, 3, 32, 32]
+features [128, 512]
+
+
+2. Features through latent-label classifier
+
+features [B, D]
+  -> Linear(D, K)
+logits   [B, K]
+
+For K=100:
+
+features [128, 512]
+logits   [128, 100]
+
+For K=50,000:
+
+features [128, 512]
+logits   [128, 50000]
+
+
+3. Instance labels lookup latent-label sets
+
+pseudo_labels [B]
+  -> memberships[pseudo_labels]
+target_sets   [B, m]
+
+For K=100, m=5:
+
+pseudo_labels [128]
+target_sets   [128, 5]
+
+Example:
+
+pseudo_labels[b] = 1234
+memberships[1234] = [7, 12, 45, 63, 88]
+target_sets[b] = [7, 12, 45, 63, 88]
+
+
+Loss: uniform_multi_ce
+----------------------
+
+Default notebook setting:
+
+loss_mode = "uniform_multi_ce"
+
+Flow:
+
+logits [B, K]
+  -> log_softmax over K latent labels
+log_probs [B, K]
+
+target_sets [B, m]
+  -> gather log_probs at all m assigned latent labels
+target_log_probs [B, m]
+
+loss = -mean(target_log_probs)
+
+Interpretation:
+
+Each instance is trained to put probability mass on all m assigned latent labels.
+For K=100,m=5, every image has 5 acceptable/required latent targets. This is the
+"instance must belong to 5 latent classes" constraint.
+
+
+Alternative Loss: set_ce
+------------------------
+
+Optional notebook setting:
+
+loss_mode = "set_ce"
+
+Formula:
+
+loss = -mean(
+    logsumexp(logits over target_sets)
+    - logsumexp(logits over all K latent labels)
+)
+
+Interpretation:
+
+The model only needs to put probability mass on at least one of the m assigned
+latent labels. This is a weaker constraint than uniform_multi_ce.
+
+
+Training Metrics
+----------------
+
+top1_in_set / acc:
+
+logits.argmax(dim=1) [B]
+  compared against target_sets [B, m]
+
+acc = fraction of examples where the top-1 predicted latent label is inside the
+instance's assigned latent-label set.
+
+
+target_hit_at_m:
+
+top m predicted latent labels [B, m]
+  compared against target_sets [B, m]
+
+target_hit_at_m = average overlap indicator between predicted top-m labels and
+assigned target labels.
+
+
+Why This Tests the Hypothesis
+-----------------------------
+
+Ordinary instance supervision:
+
+image index i -> one unique target i
+
+Low-rank multi-target supervision:
+
+image index i -> shared latent target set memberships[i]
+
+Reducing K or increasing m forces target sharing across instances. If the
+kNN-minus-linear gap is caused by independent per-instance targets fragmenting
+class geometry, then smaller K / larger m should reduce the gap, especially at
+matched or comparable kNN accuracy.

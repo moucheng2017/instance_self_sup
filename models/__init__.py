@@ -6,6 +6,8 @@ from .hierarchical_pseudo_supervised_net import HierarchicalPseudoSupervisedNet
 from .sigmoid_pseudo_supervised_net import SigmoidPseudoSupervisedNet
 from .hierarchical_balanced_vmf_self_labeling_net import HierarchicalBalancedVMFSelfLabelingNet
 from .hierarchical_kway_vmf_ot_self_labeling_net import HierarchicalKWayVMFOTSelfLabelingNet
+from .low_rank_multitarget_pseudo_supervised_net import LowRankMultitargetPseudoSupervisedNet
+from .topk_categorical_bottleneck_pic_net import TopKCategoricalBottleneckPICNet
 from torchvision.models import resnet50, resnet18
 import torch
 from .backbones import resnet18_cifar_variant1, resnet18_cifar_variant2
@@ -111,6 +113,31 @@ def get_model(model_cfg, num_classes=None):
             sigmoid_regularization_weight=getattr(model_cfg, 'sigmoid_regularization_weight', 0.0),
             sigmoid_init_temperature=getattr(model_cfg, 'sigmoid_init_temperature', 1.0),
             sigmoid_init_bias=getattr(model_cfg, 'sigmoid_init_bias', -10.0),
+        )
+    elif model_cfg.name == 'low_rank_multitarget_pseudo_supervised_net':
+        model = LowRankMultitargetPseudoSupervisedNet(
+            num_classes=num_classes,
+            backbone=get_backbone(model_cfg.backbone),
+            num_latent_classes=getattr(model_cfg, 'num_latent_classes', 100),
+            membership_size=getattr(model_cfg, 'membership_size', 5),
+            membership_seed=getattr(model_cfg, 'membership_seed', 0),
+            loss_mode=getattr(model_cfg, 'loss_mode', 'uniform_multi_ce'),
+        )
+    elif model_cfg.name == 'topk_categorical_bottleneck_pic_net':
+        model = TopKCategoricalBottleneckPICNet(
+            num_classes=num_classes,
+            backbone=get_backbone(model_cfg.backbone),
+            num_latent_classes=getattr(model_cfg, 'num_latent_classes', 100),
+            topk=getattr(model_cfg, 'topk', 5),
+            latent_temperature=getattr(model_cfg, 'latent_temperature', 1.0),
+            decoder_hidden_dim=getattr(model_cfg, 'decoder_hidden_dim', None),
+            balance_weight=getattr(model_cfg, 'balance_weight', 1.0),
+            entropy_weight=getattr(model_cfg, 'entropy_weight', 0.0),
+            target_entropy=getattr(model_cfg, 'target_entropy', None),
+            column_normalize=getattr(model_cfg, 'column_normalize', True),
+            normalize_features=getattr(model_cfg, 'normalize_features', True),
+            normalize_assigner=getattr(model_cfg, 'normalize_assigner', True),
+            use_gumbel_noise=getattr(model_cfg, 'use_gumbel_noise', True),
         )
     elif model_cfg.name == 'swav':
         raise NotImplementedError

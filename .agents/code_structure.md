@@ -187,6 +187,22 @@ Colab-oriented notebook for standalone CIFAR-10 linear evaluation.
 Adjacent notebook for flat pairwise sigmoid image-index pseudo-supervision using
 `models/sigmoid_pseudo_supervised_net.py`.
 
+### `notebooks/low-rank-multitarget-cifar10-sweep.ipynb`
+
+Diagnostic notebook for the target-rank / target-sharing hypothesis. It uses
+`configs/low_rank_multitarget_cifar_colab.yaml` and
+`models/low_rank_multitarget_pseudo_supervised_net.py` to sweep fixed balanced
+latent target rank `K`, train each run for 100 epochs, and run linear eval from
+each checkpoint.
+
+### `notebooks/topk-categorical-bottleneck-pic-cifar10-sweep.ipynb`
+
+Diagnostic notebook for the PIC-style categorical bottleneck hypothesis. It uses
+`configs/topk_categorical_bottleneck_pic_cifar_colab.yaml` and
+`models/topk_categorical_bottleneck_pic_net.py` to sweep latent capacity
+(`C`, `k`), train each run for 100 epochs, and run linear eval from each
+checkpoint.
+
 ## Current Configs
 
 Configs live in `configs/` and a few subdirectories. Current checked-in configs
@@ -206,6 +222,12 @@ include:
 - `configs/flat_vmf_ot_cifar_colab.yaml`: flat vMF OT config.
 - `configs/sigmoid_pseudo_supervised_cifar_colab.yaml`: pairwise sigmoid
   image-index baseline.
+- `configs/low_rank_multitarget_cifar_colab.yaml`: fixed balanced
+  multi-target latent-label diagnostic; launched by
+  `notebooks/low-rank-multitarget-cifar10-sweep.ipynb`.
+- `configs/topk_categorical_bottleneck_pic_cifar_colab.yaml`: PIC-style
+  instance classifier through a sampled top-k categorical bottleneck; launched
+  by `notebooks/topk-categorical-bottleneck-pic-cifar10-sweep.ipynb`.
 - `configs/baselines_ssl/`: legacy Colab SimSiam/SimCLR/STL-10 baselines.
 - `configs/python_runs/`: local Python-run SimSiam/SimCLR/BYOL configs.
 - `configs/linear_evals/`: standalone linear-evaluation configs.
@@ -235,6 +257,8 @@ Also supports `debug_subset_size`.
 `PseudoSupervisedDataset` is used by:
 
 - `sigmoid_pseudo_supervised_net`
+- `low_rank_multitarget_pseudo_supervised_net`
+- `topk_categorical_bottleneck_pic_net`
 - `hierarchical_balanced_vmf_self_labeling_net`
 - `hierarchical_kway_vmf_ot_self_labeling_net`
 - legacy `pseudo_supervised_net`
@@ -306,6 +330,8 @@ Registered model names:
 - `pseudo_supervised_net`
 - `hierarchical_pseudo_supervised_net`
 - `sigmoid_pseudo_supervised_net`
+- `low_rank_multitarget_pseudo_supervised_net`
+- `topk_categorical_bottleneck_pic_net`
 - `hierarchical_balanced_vmf_self_labeling_net`
 - `hierarchical_kway_vmf_ot_self_labeling_net` (branch 61, K-way
   rank-annealing variant)
@@ -589,6 +615,31 @@ config targets it.
 
 Legacy two-level factorized softmax for large image-index spaces. No remaining
 config targets it.
+
+### `models/low_rank_multitarget_pseudo_supervised_net.py`
+
+Diagnostic model for the target-sharing hypothesis. Each image-index pseudo-label
+maps to a fixed balanced set of `m` latent labels among `K` candidates. The
+backbone predicts K-way latent logits and is trained with either
+`uniform_multi_ce` (mass on all assigned labels) or `set_ce` (mass on at least
+one assigned label). This is not a learned clustering method; the membership
+matrix is fixed so rank K is the controlled variable.
+
+Workflow: `.agents/workflows/low_rank_multitarget_flow.txt`.
+Design: `.agents/designs/low_rank_multitarget_instance_sweep.md`.
+
+### `models/topk_categorical_bottleneck_pic_net.py`
+
+PIC-style diagnostic model with a sampled categorical bottleneck. The backbone
+feature passes through a latent assigner `[D,C]`, Gumbel-Top-k
+straight-through sampling produces a `[B,C]` multi-hot assignment with `k`
+active categories, optional one-shot column normalization rescales batch
+columns, and a linear/small-MLP decoder predicts the original image-index ID.
+The loss is instance CE plus optional global latent-usage balance and
+per-sample entropy control.
+
+Workflow: `.agents/workflows/topk_categorical_bottleneck_pic_flow.txt`.
+Design: `.agents/designs/topk_categorical_bottleneck_pic_plan.md`.
 
 ### `models/simsiam.py`, `models/simclr.py`, `models/byol.py`
 

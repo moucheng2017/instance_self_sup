@@ -1,0 +1,62 @@
+name: topk-categorical-bottleneck-pic-cifar10-colab
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  name: topk_categorical_bottleneck_pic_net
+  backbone: resnet18
+  # C latent categories and k active categories per image. Override in the
+  # notebook sweep.
+  num_latent_classes: 100
+  topk: 5
+  latent_temperature: 1.0
+  # null = linear latent->instance decoder. A small hidden layer can test a
+  # slightly more flexible bottleneck, but keep it modest to avoid bypassing C.
+  decoder_hidden_dim: null
+  # Regularizers on q(c|x). balance_weight encourages global latent usage;
+  # entropy_weight controls per-sample assignment entropy around target_entropy
+  # (null defaults to log(topk)).
+  balance_weight: 1.0
+  entropy_weight: 0.0
+  target_entropy: null
+  # One-shot column normalization over [B,C] assignments; not iterative
+  # Sinkhorn. Disable to isolate the KL-to-uniform balance loss.
+  column_normalize: True
+  normalize_features: True
+  normalize_assigner: True
+  use_gumbel_noise: True
+
+train:
+  optimizer:
+    name: sgd
+    weight_decay: 0.0005
+    disable_weight_decay: False
+    momentum: 0.9
+    beta1: 0.9
+    beta2: 0.95
+  warmup_epochs: 5
+  warmup_lr: 0
+  base_lr: 0.03
+  final_lr: 0
+  num_epochs: 100
+  stop_at_epoch: 100
+  batch_size: 128
+  source_pool_size: 50000
+  augment_probability: 1.0
+  source_subset_seed: 0
+  samples_per_epoch: 20480
+  knn_monitor: True
+  knn_interval: 1
+  knn_k: 200
+  checkpoint_saving_frequency: 50
+  use_data_parallel: False
+
+eval: False
+
+logger:
+  tensorboard: False
+  matplotlib: True
+
+seed: null

@@ -13,44 +13,73 @@ This inversion is the key diagnostic signal: the features have good *local* clas
 structure (nearest neighbors share class) but classes are not *linearly separable*
 (each class occupies a scattered, non-convex region).
 
-## Hypotheses
+## Revised Hypotheses
 
-**H1 — Fine-grained labels maximize within-class scatter (primary).**
-Instance discrimination is supervised classification with maximally fine labels:
-50,000 classes of 1 image each. Cross-entropy actively pushes apart embeddings of
-same-class images (all ~5,000 same-class images are negatives for each anchor).
-Augmentation invariance pulls views of one image together, so each image collapses
-to a tight instance-cluster — good for kNN — but the loss explicitly prevents
-instance-clusters of the same class from merging, scattering them across the sphere.
-A class becomes a union of ~5,000 dispersed point-clusters: locally clean, linearly
-inseparable. Prediction: a small MLP probe should largely close the kNN/linear gap.
+**H1 — Independent per-instance targets fragment class geometry (primary).**
+The failure is not merely that image-index supervision uses hard one-hot labels.
+It is that the targets are *independent across images*: two CIFAR-10 images from
+the same semantic class are assigned unrelated objectives. Augmentation
+invariance can still make each image's views stable, and natural image statistics
+can still put visually similar same-class images near each other locally, giving
+good kNN. But the training objective provides no force that makes all members of
+a semantic class share one convex/linear region. The resulting class support is a
+union of many small instance neighborhoods, often tangled with other classes:
+locally useful, globally nonlinearly arranged, and therefore weak for a linear
+probe. Prediction: a small MLP probe and graph/cluster metrics should recover
+substantially more of the kNN signal than a linear probe.
 
-**H2 — Evaluation asymmetry: normalization.**
-`tools/knn_monitor.py` L2-normalizes features; `linear_eval.py` probes raw backbone
-output. Feature-norm variance can hurt the linear probe independently of geometry.
-Cheap to falsify: linear probe on normalized features (+ optional BN before probe).
+**H2 — The kNN/linear inversion is a geometry problem, not just weak semantics.**
+A 70% kNN score means semantic information is present in the representation, but
+it may be encoded in neighborhood topology rather than in linearly separable
+directions. The key diagnostic is not "does the backbone know classes?" but
+"what probe complexity is required to read out classes?" Prediction: normalized
+linear < shallow MLP <= kNN, with high per-class component counts and poor Fisher
+linear separation.
 
-**H3 — The classifier/label-embedding layer absorbs the structure.**
-With a learnable `nn.Embedding` over indices (sigmoid net) or a wide FC head, the
-head can do the discriminative work, letting the backbone keep nuisance directions.
-Contrastive methods have no per-class learnable targets — the "targets" are other
-features, forcing structure into the representation itself. Prediction: spectral
-diagnostics show low effective rank or a few dominant nuisance directions.
+**H3 — Evaluation asymmetry can exaggerate the gap.**
+`tools/knn_monitor.py` L2-normalizes features; `linear_eval.py` probes raw
+backbone output. Feature-norm variance, anisotropy, or covariance collapse can
+make the linear probe look worse even when angular neighborhoods are decent.
+This is an artifact candidate, not the main causal story. Cheap falsification:
+linear probe on normalized features, BN/whitened features, and normalized linear
+classifier weights.
 
-**H4 — No projector to absorb instance-specific information.**
-In SimCLR/SimSiam the loss is applied after a projector that absorbs
-instance-/augmentation-specific details, leaving the backbone more class-abstract.
-If the index loss is applied at (or near) the backbone output, instance identity is
-burned directly into probe-layer features. Prediction: probing earlier layers shows
-a better kNN/linear relationship; adding a projector to the index loss helps.
+**H4 — Parametric heads may hide or absorb instance identity.**
+With a learnable `nn.Embedding` over indices (sigmoid net) or a wide FC
+classifier, the head can absorb much of the arbitrary image-index mapping. The
+backbone may only need to expose nuisance/detail directions sufficient for the
+head, not a class-aligned representation. Prediction: head weights classify
+indices better than backbone geometry predicts; backbone features have strong
+anisotropy or dominant nuisance components; removing/limiting the head or adding
+a projector changes where the damage appears.
 
-**H5 — Label granularity is the controlling variable.**
-Coarsening labels (cluster pseudo-labels with K classes) should interpolate
-smoothly between instance discrimination (K=50,000, inverted gap) and
-clustering-style SSL (K~10–1000, normal gap). If the kNN/linear gap flips sign as K
-decreases, the failure is intrinsic to instance-level granularity, not to
-implementation details. This also directly motivates the hierarchical OT
-self-labeling line already in this repo.
+**H5 — Loss placement controls how much instance identity contaminates the probe
+features.**
+In SimCLR/SimSiam, the SSL loss is applied after a projector, and the backbone
+can remain more semantic while the projection head carries loss-specific detail.
+If image-index loss is applied directly at the backbone output, instance identity
+is burned into the exact features used by linear evaluation. Prediction:
+layer-wise probes show earlier/intermediate features with a smaller kNN-linear
+gap; adding a projector before the index loss improves backbone linear probing
+without necessarily improving index-prediction accuracy.
+
+**H6 — Label granularity is the controlling intervention.**
+Coarsening targets should interpolate between the bad instance-index regime
+(K=N, unrelated targets per image) and cluster/self-labeling regimes where
+multiple images share a target. If the gap shrinks or flips sign as K decreases,
+the root cause is target granularity / target independence rather than the exact
+loss family. Prediction: kNN-minus-linear is largest at K=N, smaller at
+K=10k/1k, and may become normal at semantically meaningful K.
+
+**Deprioritized fix hypothesis — Distributional vMF targets alone are unlikely
+to solve the root cause.**
+Replacing one-hot index labels with fixed per-index vMF distributions keeps the
+same independence structure: each image still has an unrelated target. It is a
+clean diagnostic for "hardness of target" but not a strong remedy for the
+linear-probe gap. Memory-bank vMF targets are also not appropriate for this
+question because they turn the method toward contrastive/moving-prototype SSL.
+Therefore the next work should prioritize post-hoc diagnostics and granularity
+ablations over new per-instance target parameterizations.
 
 ## Phases
 
@@ -121,6 +150,17 @@ self-labeling direction as "annealed granularity."
 Implementation: small dataset wrapper or a `label_granularity_k` option in
 `PseudoSupervisedDataset` (minimal-change: new dataset module, register in
 `datasets/__init__.py`, one new config + notebook).
+
+First concrete diagnostic: `low_rank_multitarget_pseudo_supervised_net` sweeps
+a fixed balanced target matrix with rank K and membership size m. K=N,m=1
+approximates independent instance supervision; K<<N,m=5 forces overclustered
+target sharing and tests whether target rank alone changes the kNN-linear gap.
+
+Second concrete diagnostic: `topk_categorical_bottleneck_pic_net` keeps the
+original instance-ID CE objective but routes prediction through a sampled top-k
+categorical bottleneck. This tests whether PIC-like instance classification
+only develops the kNN-linear inversion when the latent bottleneck capacity
+(`C`, `k`) becomes large.
 
 ### Phase 4 — Synthesis
 

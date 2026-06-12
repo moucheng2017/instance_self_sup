@@ -1,0 +1,50 @@
+name: low-rank-multitarget-cifar10-colab
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  name: low_rank_multitarget_pseudo_supervised_net
+  backbone: resnet18
+  # K latent labels in the factorized target matrix. Override in the notebook.
+  num_latent_classes: 100
+  # Each image index belongs to this many latent labels. Override in the notebook.
+  membership_size: 5
+  membership_seed: 0
+  # uniform_multi_ce asks the model to put mass on all m labels. set_ce only
+  # asks it to put mass on at least one label in the set.
+  loss_mode: uniform_multi_ce
+
+train:
+  optimizer:
+    name: sgd
+    weight_decay: 0.0005
+    disable_weight_decay: False
+    momentum: 0.9
+    beta1: 0.9
+    beta2: 0.95
+  warmup_epochs: 5
+  warmup_lr: 0
+  base_lr: 0.03
+  final_lr: 0
+  num_epochs: 100
+  stop_at_epoch: 100
+  batch_size: 128
+  source_pool_size: 50000
+  augment_probability: 1.0
+  source_subset_seed: 0
+  samples_per_epoch: 20480
+  knn_monitor: True
+  knn_interval: 1
+  knn_k: 200
+  checkpoint_saving_frequency: 50
+  use_data_parallel: False
+
+eval: False
+
+logger:
+  tensorboard: False
+  matplotlib: True
+
+seed: null
