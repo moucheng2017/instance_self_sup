@@ -1,0 +1,35 @@
+import torch
+import torchvision
+from .random_dataset import RandomDataset
+
+
+def get_dataset(dataset, data_dir, transform, train=True, download=False, debug_subset_size=None):
+    if dataset == 'mnist':
+        dataset = torchvision.datasets.MNIST(data_dir, train=train, transform=transform, download=download)
+    elif dataset == 'stl10':
+        # Use the labeled 'train' split for both training and eval:
+        # - kNN memory loader needs valid labels (0-9); 'train+unlabeled' has -1 for unlabeled images.
+        # - The superimpose source pool (source_pool_size ≤ 5000) is fully covered by the 5000 labeled samples.
+        dataset = torchvision.datasets.STL10(data_dir, split='train' if train else 'test', transform=transform, download=download)
+    elif dataset == 'stl10_unlabeled':
+        # Full unlabeled split (100,000 images) for whole-dataset pseudo-supervised training.
+        # eval split falls back to the labeled test set; kNN monitor should be disabled in configs
+        # that use this dataset because the unlabeled split has no class labels.
+        split = 'unlabeled' if train else 'test'
+        dataset = torchvision.datasets.STL10(data_dir, split=split, transform=transform, download=download)
+    elif dataset == 'cifar10':
+        dataset = torchvision.datasets.CIFAR10(data_dir, train=train, transform=transform, download=download)
+    elif dataset == 'cifar100':
+        dataset = torchvision.datasets.CIFAR100(data_dir, train=train, transform=transform, download=download)
+    elif dataset == 'imagenet':
+        dataset = torchvision.datasets.ImageNet(data_dir, split='train' if train == True else 'val', transform=transform, download=download)
+    elif dataset == 'random':
+        dataset = RandomDataset()
+    else:
+        raise NotImplementedError
+
+    if debug_subset_size is not None:
+        dataset = torch.utils.data.Subset(dataset, range(0, debug_subset_size)) # take only one batch
+        dataset.classes = dataset.dataset.classes
+        dataset.targets = dataset.dataset.targets
+    return dataset

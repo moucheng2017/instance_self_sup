@@ -1,0 +1,13 @@
+# ignore all .pycache__ directories
+__pycache__/
+.pycache/
+# ignore pytest cache
+.pytest_cache/
+# ignore all .pyo files
+*.pyo
+# ignore all .pyc files
+*.pyc
+# ignore all .pyd files
+*.pyd
+# ignore reference papers and other PDFs
+*.pdf

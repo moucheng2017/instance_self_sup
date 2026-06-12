@@ -1,0 +1,62 @@
+name: flat-vmf-ot-cifar10-colab
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  name: hierarchical_balanced_vmf_self_labeling_net
+  backbone: resnet18
+  embedding_dim: 256
+  # Kept for compatibility with the shared model/config surface. flat_vmf_ot
+  # uses flat_vmf_num_components for K when it is set.
+  depth: 6
+  kappa: 20.0
+  ot_epsilon: 0.05
+  # K-way Sinkhorn uses max(sinkhorn_iters, 50) internally.
+  sinkhorn_iters: 50
+  em_iters: 5
+  # Non-recursive K-way vMF mixture fitting with balanced Sinkhorn transport.
+  ot_assignment_mode: flat_vmf_ot
+  flat_vmf_num_components: 64
+  batch_self_labeling: True
+  learnable_vmf_prototypes: False
+  prototype_ema_momentum: 0.9
+  sigmoid_regularization_weight: 0.1
+  sigmoid_init_temperature: 1.0
+  sigmoid_init_bias: -6.236
+
+train:
+  optimizer:
+    name: adam
+    weight_decay: 0.0
+    momentum: 0.9
+    beta1: 0.9
+    beta2: 0.95
+  warmup_epochs: 10
+  warmup_lr: 0
+  base_lr: 0.001
+  final_lr: 0
+  num_epochs: 100
+  stop_at_epoch: 100
+  batch_size: 512
+  source_pool_size: 50000
+  augment_probability: 1.0
+  source_subset_seed: 0
+  samples_per_epoch: 20480
+  tree_refresh_interval: 0
+  tree_refresh_batch_size: 1024
+  sigmoid_regularization_rampup_epochs: 20
+  knn_monitor: True
+  knn_interval: 1
+  knn_k: 200
+  checkpoint_saving_frequency: 50
+  use_data_parallel: False
+
+eval: False
+
+logger:
+  tensorboard: False
+  matplotlib: True
+
+seed: null
