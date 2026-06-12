@@ -199,9 +199,8 @@ each checkpoint.
 
 Diagnostic notebook for the PIC-style categorical bottleneck hypothesis. It uses
 `configs/topk_categorical_bottleneck_pic_cifar_colab.yaml` and
-`models/topk_categorical_bottleneck_pic_net.py` to sweep latent capacity
-(`C`, `k`), train each run for 100 epochs, and run linear eval from each
-checkpoint.
+`models/topk_categorical_bottleneck_pic_net.py` to sweep latent capacity `C`,
+train each run for 100 epochs, and run linear eval from each checkpoint.
 
 ## Current Configs
 
@@ -226,8 +225,8 @@ include:
   multi-target latent-label diagnostic; launched by
   `notebooks/low-rank-multitarget-cifar10-sweep.ipynb`.
 - `configs/topk_categorical_bottleneck_pic_cifar_colab.yaml`: PIC-style
-  instance classifier through a sampled top-k categorical bottleneck; launched
-  by `notebooks/topk-categorical-bottleneck-pic-cifar10-sweep.ipynb`.
+  instance classifier through a deterministic soft categorical bottleneck;
+  launched by `notebooks/topk-categorical-bottleneck-pic-cifar10-sweep.ipynb`.
 - `configs/baselines_ssl/`: legacy Colab SimSiam/SimCLR/STL-10 baselines.
 - `configs/python_runs/`: local Python-run SimSiam/SimCLR/BYOL configs.
 - `configs/linear_evals/`: standalone linear-evaluation configs.
@@ -630,13 +629,12 @@ Design: `.agents/designs/low_rank_multitarget_instance_sweep.md`.
 
 ### `models/topk_categorical_bottleneck_pic_net.py`
 
-PIC-style diagnostic model with a sampled categorical bottleneck. The backbone
-feature passes through a latent assigner `[D,C]`, Gumbel-Top-k
-straight-through sampling produces a `[B,C]` multi-hot assignment with `k`
-active categories, optional one-shot column normalization rescales batch
-columns, and a linear/small-MLP decoder predicts the original image-index ID.
-The loss is instance CE plus optional global latent-usage balance and
-per-sample entropy control.
+PIC-style diagnostic model with a deterministic soft categorical bottleneck.
+The backbone feature passes through a latent assigner `[D,C]`, softmax produces
+a `[B,C]` assignment distribution, optional one-shot column normalization
+rescales batch columns, and a linear/small-MLP decoder predicts the original
+image-index ID. The loss is instance CE plus optional global latent-usage
+balance and per-sample entropy control.
 
 Workflow: `.agents/workflows/topk_categorical_bottleneck_pic_flow.txt`.
 Design: `.agents/designs/topk_categorical_bottleneck_pic_plan.md`.

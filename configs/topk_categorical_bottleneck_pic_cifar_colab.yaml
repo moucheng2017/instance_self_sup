@@ -1,4 +1,4 @@
-name: topk-categorical-bottleneck-pic-cifar10-colab
+name: soft-categorical-bottleneck-pic-cifar10-colab
 dataset:
   name: cifar10
   image_size: 32
@@ -7,17 +7,14 @@ dataset:
 model:
   name: topk_categorical_bottleneck_pic_net
   backbone: resnet18
-  # C latent categories and k active categories per image. Override in the
+  # C latent categories in the deterministic soft bottleneck. Override in the
   # notebook sweep.
   num_latent_classes: 100
-  topk: 5
-  latent_temperature: 0.2
   # null = linear latent->instance decoder. A small hidden layer can test a
   # slightly more flexible bottleneck, but keep it modest to avoid bypassing C.
   decoder_hidden_dim: null
   # Regularizers on q(c|x). balance_weight encourages global latent usage;
-  # entropy_weight controls per-sample assignment entropy around target_entropy
-  # (null defaults to log(topk)).
+  # entropy_weight controls per-sample assignment entropy around target_entropy.
   balance_weight: 1.0
   entropy_weight: 0.0
   target_entropy: null
@@ -26,7 +23,6 @@ model:
   column_normalize: True
   normalize_features: True
   normalize_assigner: True
-  use_gumbel_noise: True
 
 train:
   optimizer:

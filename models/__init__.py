@@ -108,6 +108,7 @@ def get_model(model_cfg, num_classes=None):
             ot_unbalanced_tau=getattr(model_cfg, 'ot_unbalanced_tau', None),
             ot_unbalanced_min_split_fraction=getattr(model_cfg, 'ot_unbalanced_min_split_fraction', 0.05),
             batch_self_labeling=getattr(model_cfg, 'batch_self_labeling', True),
+            swapped_view_assignment=getattr(model_cfg, 'swapped_view_assignment', False),
             learnable_vmf_prototypes=getattr(model_cfg, 'learnable_vmf_prototypes', False),
             prototype_ema_momentum=getattr(model_cfg, 'prototype_ema_momentum', None),
             sigmoid_regularization_weight=getattr(model_cfg, 'sigmoid_regularization_weight', 0.0),
@@ -128,8 +129,6 @@ def get_model(model_cfg, num_classes=None):
             num_classes=num_classes,
             backbone=get_backbone(model_cfg.backbone),
             num_latent_classes=getattr(model_cfg, 'num_latent_classes', 100),
-            topk=getattr(model_cfg, 'topk', 5),
-            latent_temperature=getattr(model_cfg, 'latent_temperature', 1.0),
             decoder_hidden_dim=getattr(model_cfg, 'decoder_hidden_dim', None),
             balance_weight=getattr(model_cfg, 'balance_weight', 1.0),
             entropy_weight=getattr(model_cfg, 'entropy_weight', 0.0),
@@ -137,7 +136,6 @@ def get_model(model_cfg, num_classes=None):
             column_normalize=getattr(model_cfg, 'column_normalize', True),
             normalize_features=getattr(model_cfg, 'normalize_features', True),
             normalize_assigner=getattr(model_cfg, 'normalize_assigner', True),
-            use_gumbel_noise=getattr(model_cfg, 'use_gumbel_noise', True),
         )
     elif model_cfg.name == 'swav':
         raise NotImplementedError

@@ -1,5 +1,5 @@
-Top-k Categorical Bottleneck PIC: Computational Flow
-====================================================
+Soft Categorical Bottleneck PIC: Computational Flow
+===================================================
 
 Experiment files:
 - Model: models/topk_categorical_bottleneck_pic_net.py
@@ -14,7 +14,6 @@ B = batch size, default 128
 N = number of source-pool instances, default 50,000 for CIFAR-10
 D = backbone feature dimension, 512 for resnet18
 C = number of latent categorical classes
-k = number of active latent classes per image
 
 
 Data Loader Output
@@ -62,23 +61,19 @@ assigner      [512, 100]
 latent_logits [128, 100]
 
 
-3. Gumbel-Top-k categorical sample
+3. Soft categorical assignment
 
 latent_logits [B, C]
-  -> add Gumbel noise during training
-  -> softmax temperature tau
-  -> top-k straight-through sample
+  -> softmax over C latent categories
 
 Outputs:
 
 soft_probs       [B, C], rows sum to 1
-hard_assignments [B, C], rows sum to k
-assignments      [B, C], hard forward pass with soft gradients
+assignments      [B, C], same tensor used by the decoder
 
-Example C=100,k=5:
+Example C=100:
 
 soft_probs       [128, 100]
-hard_assignments [128, 100], exactly 5 ones per row
 assignments      [128, 100]
 
 
@@ -136,8 +131,9 @@ entropy = H(soft_probs[b]) for each sample
 
 loss_entropy = mean((entropy - target_entropy)^2)
 
-Default target_entropy is log(k), so the soft posterior roughly matches the
-intended top-k support size when this loss is enabled.
+Set target_entropy explicitly when this loss is enabled. Leaving
+target_entropy null and entropy_weight 0.0 keeps the first diagnostic focused
+on deterministic bottleneck capacity and global usage balance.
 
 
 Total loss:
@@ -154,7 +150,7 @@ acc:
   Top-1 instance-ID accuracy from instance_logits.
 
 latent_perplexity:
-  exp(H(mean hard assignment usage)).
+  exp(H(mean soft assignment usage)).
   Measures how many latent categories are effectively used.
 
 latent_entropy:
@@ -168,11 +164,11 @@ PIC uses a direct high-capacity instance classifier:
 
 feature [B,D] -> instance logits [B,N]
 
-Top-k categorical bottleneck PIC restricts instance prediction through C latent
+Soft categorical bottleneck PIC restricts instance prediction through C latent
 categories:
 
-feature [B,D] -> top-k latent set [B,C] -> instance logits [B,N]
+feature [B,D] -> soft latent assignment [B,C] -> instance logits [B,N]
 
-Sweeping C and k controls the instance-prediction bottleneck capacity. If the
-kNN-linear gap grows as C/k grow, it supports the hypothesis that excessive
+Sweeping C controls the instance-prediction bottleneck capacity. If the
+kNN-linear gap grows as C grows, it supports the hypothesis that excessive
 instance-label capacity fragments semantic class geometry.

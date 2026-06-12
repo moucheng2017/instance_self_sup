@@ -157,10 +157,10 @@ approximates independent instance supervision; K<<N,m=5 forces overclustered
 target sharing and tests whether target rank alone changes the kNN-linear gap.
 
 Second concrete diagnostic: `topk_categorical_bottleneck_pic_net` keeps the
-original instance-ID CE objective but routes prediction through a sampled top-k
-categorical bottleneck. This tests whether PIC-like instance classification
-only develops the kNN-linear inversion when the latent bottleneck capacity
-(`C`, `k`) becomes large.
+original instance-ID CE objective but routes prediction through a deterministic
+soft categorical bottleneck. This tests whether PIC-like instance
+classification only develops the kNN-linear inversion when the latent bottleneck
+capacity `C` becomes large.
 
 ### Phase 4 — Synthesis
 

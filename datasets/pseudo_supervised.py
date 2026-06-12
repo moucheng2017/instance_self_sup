@@ -17,9 +17,14 @@ class PseudoSupervisedDataset(Dataset):
         augment_probability=1.0,
         subset_seed=0,
         samples_per_epoch=None,
+        num_views=1,
     ):
         self.dataset = dataset
         self.transform = SuperimposeTransform(image_size=image_size)
+
+        self.num_views = int(num_views)
+        if self.num_views < 1:
+            raise ValueError("num_views must be at least 1.")
 
         if source_pool_size is None:
             raise ValueError("source_pool_size must be provided for PseudoSupervisedDataset.")
@@ -58,5 +63,12 @@ class PseudoSupervisedDataset(Dataset):
         del idx  # Samples are drawn randomly from the fixed pseudo-labeled source pool.
         source_index, pseudo_label = self._sample_source()
         image, _ = self.dataset[source_index]
-        image_tensor = self.transform.postprocess(self._transform_image(image))
-        return image_tensor, torch.tensor(pseudo_label, dtype=torch.long)
+        if self.num_views == 1:
+            image_tensor = self.transform.postprocess(self._transform_image(image))
+            return image_tensor, torch.tensor(pseudo_label, dtype=torch.long)
+        # Independent augmentation draws stacked as [num_views, C, H, W]
+        # (e.g. for swapped-view assignment models).
+        views = torch.stack(
+            [self.transform.postprocess(self._transform_image(image)) for _ in range(self.num_views)]
+        )
+        return views, torch.tensor(pseudo_label, dtype=torch.long)

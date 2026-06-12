@@ -82,6 +82,7 @@ class HierarchicalKWayVMFOTSelfLabelingNet(nn.Module):
         ot_unbalanced_tau=None,
         ot_unbalanced_min_split_fraction=0.05,
         batch_self_labeling=True,
+        swapped_view_assignment=False,
         learnable_vmf_prototypes=False,
         prototype_ema_momentum=None,
         sigmoid_regularization_weight=0.0,
@@ -131,6 +132,13 @@ class HierarchicalKWayVMFOTSelfLabelingNet(nn.Module):
         self.sinkhorn_iters = int(sinkhorn_iters)
         self.em_iters = int(em_iters)
         self.batch_self_labeling = bool(batch_self_labeling)
+        self.swapped_view_assignment = bool(swapped_view_assignment)
+        if self.swapped_view_assignment and not self.batch_self_labeling:
+            raise ValueError(
+                "swapped_view_assignment requires batch_self_labeling=True: the "
+                "tree must be (re)fit on the current batch so each view can "
+                "predict the other view's freshly assigned path."
+            )
         self.ot_unbalanced_tau = None if ot_unbalanced_tau is None else float(ot_unbalanced_tau)
         self.ot_unbalanced_min_split_fraction = float(ot_unbalanced_min_split_fraction)
         self.learnable_vmf_prototypes = bool(learnable_vmf_prototypes)
@@ -519,34 +527,91 @@ class HierarchicalKWayVMFOTSelfLabelingNet(nn.Module):
         loss = -F.logsigmoid(signed_targets * logits).mean()
         return {"loss_sigmoid_regularization": loss}
 
+    def _forward_swapped_views(self, z_flat, batch_size):
+        """Symmetric swapped-view prediction (SwAV-style), batch-local tree.
+
+        ``z_flat`` is [2B, d], sample-major (the two views of image ``i`` sit at
+        rows ``2i`` and ``2i + 1``). One tree is fit on all 2B detached
+        embeddings (shared prototypes), then each view is trained to predict
+        the *other* view's assigned path. Unlike single-view batch
+        self-labeling -- where any stable partition of the batch is a perfect,
+        self-confirming solution -- the swapped loss is only low when the two
+        augmentations of an image route identically, i.e. when the partition
+        is augmentation-invariant.
+        """
+        current = self._prepared_prototypes()
+        prototypes, paths, node_ids, masks, _ = self._build_kway_tree(
+            z_flat.detach(), fallback_prototypes=current.detach(), warm_start=True
+        )
+        self._ema_update_prototypes(prototypes)
+        loss_prototypes = self._prepared_prototypes() if self.learnable_vmf_prototypes else prototypes
+
+        z = z_flat.view(batch_size, 2, -1)
+        paths = paths.view(batch_size, 2, self.depth)
+        node_ids = node_ids.view(batch_size, 2, self.depth)
+        masks = masks.view(batch_size, 2, self.depth)
+
+        # Swapped prediction: view 1 predicts view 0's path and vice versa.
+        first = self._forward_embeddings(z[:, 1], paths[:, 0], node_ids[:, 0], masks[:, 0], loss_prototypes)
+        second = self._forward_embeddings(z[:, 0], paths[:, 1], node_ids[:, 1], masks[:, 1], loss_prototypes)
+
+        data_dict = {
+            "loss": 0.5 * (first["loss"] + second["loss"]),
+            "acc": 0.5 * (first["acc"] + second["acc"]),
+            "acc_branch": 0.5 * (first["acc_branch"] + second["acc_branch"]),
+            "active_depth": first["active_depth"],
+        }
+        with torch.no_grad():
+            # Diagnostic: do the two views of an image get the same OT
+            # assignment? This is the invariance the swapped loss optimizes.
+            sup = min(self.depth, self.active_depth)
+            both = masks[:, 0, :sup] & masks[:, 1, :sup]
+            agree = (paths[:, 0, :sup] == paths[:, 1, :sup]) & both
+            data_dict["tree_view_agreement"] = agree.float().sum() / both.float().sum().clamp_min(1.0)
+        return data_dict
+
     def forward(self, images, pseudo_labels):
         if pseudo_labels.ndim != 1:
             raise ValueError("pseudo_labels must have shape [batch_size].")
-        if images.ndim != 4:
-            raise ValueError("images must have shape [batch_size, channels, height, width].")
 
-        z = self.encode(images)
-
-        if self.batch_self_labeling:
-            current = self._prepared_prototypes()
-            prototypes, paths, node_ids, masks, _ = self._build_kway_tree(
-                z.detach(), fallback_prototypes=current.detach(), warm_start=True
-            )
-            self._ema_update_prototypes(prototypes)
-            loss_prototypes = self._prepared_prototypes() if self.learnable_vmf_prototypes else prototypes
-            data_dict = self._forward_embeddings(z, paths, node_ids, masks, loss_prototypes)
+        if self.swapped_view_assignment:
+            if images.ndim != 5 or images.shape[1] != 2:
+                raise ValueError(
+                    "swapped_view_assignment expects images of shape "
+                    "[batch_size, 2, channels, height, width]; set train.num_views: 2."
+                )
+            z = self.encode(images.flatten(0, 1))
+            data_dict = self._forward_swapped_views(z, images.shape[0])
+            reg_z = z
+            reg_labels = pseudo_labels.long().repeat_interleave(2)
         else:
-            labels = pseudo_labels.long()
-            data_dict = self._forward_embeddings(
-                z,
-                self.assignment_paths[labels],
-                self.assignment_node_ids[labels],
-                self.assignment_masks[labels],
-                self._prepared_prototypes(),
-            )
+            if images.ndim != 4:
+                raise ValueError("images must have shape [batch_size, channels, height, width].")
+
+            z = self.encode(images)
+
+            if self.batch_self_labeling:
+                current = self._prepared_prototypes()
+                prototypes, paths, node_ids, masks, _ = self._build_kway_tree(
+                    z.detach(), fallback_prototypes=current.detach(), warm_start=True
+                )
+                self._ema_update_prototypes(prototypes)
+                loss_prototypes = self._prepared_prototypes() if self.learnable_vmf_prototypes else prototypes
+                data_dict = self._forward_embeddings(z, paths, node_ids, masks, loss_prototypes)
+            else:
+                labels = pseudo_labels.long()
+                data_dict = self._forward_embeddings(
+                    z,
+                    self.assignment_paths[labels],
+                    self.assignment_node_ids[labels],
+                    self.assignment_masks[labels],
+                    self._prepared_prototypes(),
+                )
+            reg_z = z
+            reg_labels = pseudo_labels
 
         if self.sigmoid_regularization_max_weight > 0:
-            reg = self._sigmoid_regularization(z, pseudo_labels)
+            reg = self._sigmoid_regularization(reg_z, reg_labels)
             weight = self.sigmoid_regularization_current_weight
             data_dict["loss_hierarchical"] = data_dict["loss"]
             data_dict["loss"] = data_dict["loss"] + weight * reg["loss_sigmoid_regularization"]

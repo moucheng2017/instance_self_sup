@@ -1,4 +1,4 @@
-# Plan: Top-k Categorical Bottleneck PIC
+# Plan: Soft Categorical Bottleneck PIC
 
 Status: implemented draft (2026-06-12)
 Related: `.agents/designs/research_plan_instance_discrimination_limitations.md`
@@ -18,14 +18,14 @@ instance logits [B,N]
 CE(instance_id)
 ```
 
-This experiment inserts a sampled categorical bottleneck before instance
+This experiment inserts a deterministic soft categorical bottleneck before instance
 classification:
 
 ```text
 image -> backbone -> feature z [B,D]
 z -> latent assigner [D,C]
-q(c|x), top-k sample y [B,C]
-y -> decoder / classifier [C,N]
+q(c|x) [B,C]
+q -> decoder / classifier [C,N]
 instance logits [B,N]
 CE(instance_id)
 ```
@@ -37,7 +37,7 @@ assignment, not as a standalone claim of a novel SSL algorithm.
 
 1. Does constraining instance prediction through `C` latent categories reduce
    the kNN-minus-linear-probe gap?
-2. Does the gap reappear as bottleneck capacity grows (`C` and `k`)?
+2. Does the gap reappear as bottleneck capacity grows (`C`)?
 3. Are latent categories used broadly, or does the model collapse to a small
    subset?
 
@@ -53,8 +53,8 @@ images [B,3,32,32]
 features [B,D]
   -> latent_assigner_matrix [D,C]
 latent_logits [B,C]
-  -> Gumbel-Top-k straight-through
-assignments [B,C], exactly k active entries in the forward pass
+  -> softmax
+assignments [B,C], rows sum to 1
   -> optional one-shot column normalization over batch columns
 decoder_input [B,C]
   -> linear or shallow MLP decoder
@@ -74,7 +74,7 @@ Defaults:
 
 - `lambda_balance = 1.0`
 - `lambda_entropy = 0.0`
-- `target_entropy = log(k)` when used
+- `target_entropy = null` by default; set explicitly when entropy control is used
 - `column_normalize = True`
 - linear decoder (`decoder_hidden_dim: null`)
 
@@ -88,7 +88,7 @@ Tests are in `tests/test_topk_categorical_bottleneck_pic.py`.
 
 They specify:
 
-- Gumbel-Top-k evaluation path returns exact k-hot assignments.
+- Soft categorical assignment rows are finite probabilities that sum to 1.
 - Column normalization preserves shape/total mass and handles empty columns.
 - The model forward pass returns scalar total/instance/balance/entropy losses
   and latent-usage diagnostics.
@@ -112,11 +112,10 @@ Notebook:
 Initial 100-epoch sweep:
 
 ```text
-C=50,   k=1
-C=100,  k=5
-C=500,  k=5
-C=1000, k=5
-C=5000, k=5
+C=100
+C=1000
+C=5000
+C=10000
 ```
 
 For each run:

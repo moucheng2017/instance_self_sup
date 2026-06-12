@@ -75,6 +75,7 @@ def build_train_loader(args):
             augment_probability=getattr(args.train, "augment_probability", 1.0),
             subset_seed=getattr(args.train, "source_subset_seed", 0),
             samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
+            num_views=getattr(args.train, "num_views", 1),
         )
         return torch.utils.data.DataLoader(
             dataset=dataset,

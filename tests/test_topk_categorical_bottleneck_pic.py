@@ -3,7 +3,7 @@ import torch
 from models.topk_categorical_bottleneck_pic_net import (
     TopKCategoricalBottleneckPICNet,
     column_normalize_assignments,
-    gumbel_topk_straight_through,
+    soft_categorical_assignments,
 )
 
 
@@ -21,7 +21,7 @@ class TinyBackbone(torch.nn.Module):
         return self.net(images)
 
 
-def test_gumbel_topk_eval_has_exact_k_active_categories():
+def test_soft_categorical_assignments_are_probabilities():
     logits = torch.tensor(
         [
             [0.1, 3.0, 2.0, -1.0, 0.0],
@@ -29,20 +29,12 @@ def test_gumbel_topk_eval_has_exact_k_active_categories():
         ]
     )
 
-    assignments, soft_probs, hard = gumbel_topk_straight_through(
-        logits,
-        k=2,
-        temperature=1.0,
-        training=False,
-        use_gumbel_noise=False,
-    )
+    assignments = soft_categorical_assignments(logits)
 
     assert assignments.shape == logits.shape
-    assert soft_probs.shape == logits.shape
-    assert hard.shape == logits.shape
-    assert torch.allclose(hard.sum(dim=1), torch.full((2,), 2.0))
-    assert hard[0].nonzero().flatten().tolist() == [1, 2]
-    assert hard[1].nonzero().flatten().tolist() == [0, 3]
+    assert torch.isfinite(assignments).all()
+    assert torch.allclose(assignments.sum(dim=1), torch.ones(2))
+    assert assignments.argmax(dim=1).tolist() == [1, 0]
 
 
 def test_column_normalize_preserves_total_mass_and_no_nans():
@@ -67,13 +59,10 @@ def test_model_forward_returns_instance_and_bottleneck_losses():
         num_classes=16,
         backbone=TinyBackbone(),
         num_latent_classes=5,
-        topk=2,
-        latent_temperature=0.7,
         decoder_hidden_dim=12,
         balance_weight=0.1,
         entropy_weight=0.1,
         target_entropy=0.7,
-        use_gumbel_noise=False,
     )
     images = torch.randn(4, 3, 4, 4)
     labels = torch.tensor([0, 1, 2, 3])
