@@ -3,7 +3,7 @@ import copy
 import os
 import random
 import re
-import shutil
+import subprocess
 from datetime import datetime
 
 import numpy as np
@@ -14,8 +14,7 @@ import yaml
 class Namespace(object):
     def __init__(self, somedict):
         for key, value in somedict.items():
-            if not (isinstance(key, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)):
-                raise ValueError(f"Config key {key!r} is not a valid Python identifier.")
+            assert isinstance(key, str) and re.match("[A-Za-z_-]", key)
             if isinstance(value, dict):
                 self.__dict__[key] = Namespace(value)
             else:
@@ -54,37 +53,88 @@ def _deep_update(base, updates):
     return base
 
 
+def _git_metadata(config_file):
+    git_cwd = os.path.dirname(os.path.abspath(config_file)) or os.getcwd()
+
+    def _run_git(*args):
+        return subprocess.check_output(
+            ["git", *args],
+            cwd=git_cwd,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+
+    try:
+        status = _run_git("status", "--short")
+        return {
+            "git_commit": _run_git("rev-parse", "HEAD"),
+            "git_branch": _run_git("rev-parse", "--abbrev-ref", "HEAD"),
+            "git_is_dirty": bool(status),
+        }
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {
+            "git_commit": None,
+            "git_branch": None,
+            "git_is_dirty": None,
+        }
+
+
+def _annotate_config_for_reproducibility(config, config_file):
+    config = copy.deepcopy(config)
+    config["reproducibility"] = {
+        **config.get("reproducibility", {}),
+        **_git_metadata(config_file),
+    }
+    return config
+
+
+def save_effective_config(args, target_dir):
+    config = getattr(args, "effective_config", None)
+    if config is None:
+        return None
+
+    config_path = os.path.join(target_dir, os.path.basename(args.config_file))
+    with open(config_path, "w") as f:
+        yaml.safe_dump(config, f, sort_keys=False)
+    return config_path
+
+
 def _apply_debug_overrides(args):
     if args.debug:
         if getattr(args, "train", None):
             args.train.batch_size = 2
             args.train.num_epochs = 1
             args.train.stop_at_epoch = 1
-            # Cap source_pool_size so PseudoSupervisedDataset does not exceed
-            # the debug-subset dataset length (debug_subset_size elements).
-            if hasattr(args.train, "source_pool_size"):
-                args.train.source_pool_size = min(
-                    int(args.train.source_pool_size),
-                    args.debug_subset_size,
+            if getattr(args, "effective_config", None):
+                args.effective_config.setdefault("train", {})
+                args.effective_config["train"].update(
+                    {
+                        "batch_size": 2,
+                        "num_epochs": 1,
+                        "stop_at_epoch": 1,
+                    }
                 )
-            # Cap samples_per_epoch so an epoch is a handful of batches, not
-            # thousands (default 20480 / batch_size=2 = 10240 batches).
-            if hasattr(args.train, "samples_per_epoch"):
-                args.train.samples_per_epoch = args.train.batch_size * 2
         if getattr(args, "eval", None):
             args.eval.batch_size = 2
             args.eval.num_epochs = 1
+            if getattr(args, "effective_config", None):
+                args.effective_config.setdefault("eval", {})
+                args.effective_config["eval"].update(
+                    {
+                        "batch_size": 2,
+                        "num_epochs": 1,
+                    }
+                )
         args.dataset.num_workers = 0
+        if getattr(args, "effective_config", None):
+            args.effective_config.setdefault("dataset", {})
+            args.effective_config["dataset"]["num_workers"] = 0
 
 
-def _prepare_runtime_args(args, config_file, merged_config, create_dirs=True):
+def _prepare_runtime_args(args, config_file, create_dirs=True):
     _apply_debug_overrides(args)
 
-    if None in [args.log_dir, args.data_dir, args.ckpt_dir, args.name]:
-        raise ValueError(
-            "log_dir, data_dir, ckpt_dir, and name must all be set. "
-            "Pass them explicitly or set the DATA, LOG, and CHECKPOINT environment variables."
-        )
+    assert not None in [args.log_dir, args.data_dir, args.ckpt_dir, args.name]
 
     run_name = "in-progress_" + datetime.now().strftime("%m%d%H%M%S_") + args.name
     args.log_dir = os.path.join(args.log_dir, run_name)
@@ -93,11 +143,7 @@ def _prepare_runtime_args(args, config_file, merged_config, create_dirs=True):
         os.makedirs(args.log_dir, exist_ok=False)
         print(f"creating file {args.log_dir}")
         os.makedirs(args.ckpt_dir, exist_ok=True)
-        # Save the fully-merged config (base YAML + all overrides) so the log
-        # directory is self-contained and exactly reproduces this run.
-        config_save_path = os.path.join(args.log_dir, os.path.basename(config_file))
-        with open(config_save_path, "w") as f:
-            yaml.dump(merged_config, f, default_flow_style=False, sort_keys=False)
+        save_effective_config(args, args.log_dir)
 
     set_deterministic(getattr(args, "seed", None))
 
@@ -134,13 +180,13 @@ def build_args(
     ckpt_dir=None,
     device=None,
     eval_from=None,
-    checkpoint_resume=None,
     hide_progress=False,
     create_dirs=True,
 ):
     config = copy.deepcopy(load_config(config_file))
     if overrides:
         _deep_update(config, copy.deepcopy(overrides))
+    config = _annotate_config_for_reproducibility(config, config_file)
 
     args = argparse.Namespace(
         config_file=config_file,
@@ -152,14 +198,14 @@ def build_args(
         ckpt_dir=ckpt_dir if ckpt_dir is not None else os.getenv("CHECKPOINT"),
         device=device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"),
         eval_from=eval_from,
-        checkpoint_resume=checkpoint_resume,
         hide_progress=hide_progress,
+        effective_config=copy.deepcopy(config),
     )
 
     for key, value in Namespace(config).__dict__.items():
         vars(args)[key] = value
 
-    return _prepare_runtime_args(args, config_file=config_file, merged_config=config, create_dirs=create_dirs)
+    return _prepare_runtime_args(args, config_file=config_file, create_dirs=create_dirs)
 
 
 def get_args():
@@ -173,7 +219,6 @@ def get_args():
     parser.add_argument("--ckpt_dir", type=str, default=os.getenv("CHECKPOINT"))
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--eval_from", type=str, default=None)
-    parser.add_argument("--checkpoint_resume", type=str, default=None)
     parser.add_argument("--hide_progress", action="store_true")
     parsed = parser.parse_args()
 
@@ -187,7 +232,6 @@ def get_args():
         ckpt_dir=parsed.ckpt_dir,
         device=parsed.device,
         eval_from=parsed.eval_from,
-        checkpoint_resume=parsed.checkpoint_resume,
         hide_progress=parsed.hide_progress,
         create_dirs=True,
     )

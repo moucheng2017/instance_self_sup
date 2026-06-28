@@ -1,40 +1,24 @@
+import copy
+import math
 import os
 from datetime import datetime
 
 import torch
 from tqdm import tqdm
 
-from arguments import get_args
+from arguments import get_args, save_effective_config
 from augmentations import get_aug
 from datasets import get_dataset
 from datasets.pseudo_supervised import PseudoSupervisedDataset
-from linear_eval import load_backbone_weights, main as linear_eval
+from linear_eval import main as linear_eval
 from models import get_model
-from models.hierarchical_balanced_vmf_self_labeling_net import compute_active_depth, compute_unbalanced_tau
 from optimizers import LR_Scheduler, get_optimizer
 from tools import Logger, knn_monitor
-from tools.monitor_plots import (
-    append_history,
-    save_training_monitor_svg,
-    save_tree_health_monitor_svg,
-    save_tree_structure_monitor_svg,
-)
-from tools.tree_metrics import prefix_label_metrics
 
-
-class PseudoSourcePoolDataset(torch.utils.data.Dataset):
-    def __init__(self, pseudo_dataset):
-        self.dataset = pseudo_dataset.dataset
-        self.source_indices = pseudo_dataset.source_indices
-        self.transform = pseudo_dataset.transform
-
-    def __len__(self):
-        return len(self.source_indices)
-
-    def __getitem__(self, idx):
-        image, _ = self.dataset[self.source_indices[idx]]
-        image_tensor = self.transform.postprocess(self.transform.clean(image))
-        return image_tensor, torch.tensor(idx, dtype=torch.long)
+try:
+    from datasets.superimpose import SuperimposeSourcesDataset
+except ModuleNotFoundError:
+    SuperimposeSourcesDataset = None
 
 
 def maybe_data_parallel(model, args):
@@ -48,32 +32,57 @@ def unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def get_classifier_head(model):
+    raw = unwrap_model(model)
+    classifier = getattr(raw, "classifier", None)
+    if classifier is not None:
+        return classifier
+    return getattr(raw, "pred", None)
+
+
+def reset_classifier_head(model):
+    head = get_classifier_head(model)
+    if head is None:
+        raise ValueError("The model does not expose a classifier head to reset.")
+    for module in head.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+
+
 def _get_num_workers(args):
     return args.dataloader_kwargs.get("num_workers", 0)
 
 
 def build_train_loader(args):
 
-    if args.model.name in (
-        "pseudo_supervised_net",
-        "hierarchical_pseudo_supervised_net",
-        "sigmoid_pseudo_supervised_net",
-        "hierarchical_balanced_vmf_self_labeling_net",
-        "hierarchical_kway_vmf_ot_self_labeling_net",
-    ):
+    if args.model.name in ("superimpose_net", "pseudo_supervised_net"):
         base_dataset = get_dataset(
             transform=None,
             train=True,
             **args.dataset_kwargs,
         )
-        dataset = PseudoSupervisedDataset(
-            dataset=base_dataset,
-            image_size=args.dataset.image_size,
-            source_pool_size=getattr(args.train, "source_pool_size", None),
-            augment_probability=getattr(args.train, "augment_probability", 1.0),
-            subset_seed=getattr(args.train, "source_subset_seed", 0),
-            samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
-        )
+        if args.model.name == "superimpose_net":
+            if SuperimposeSourcesDataset is None:
+                raise ImportError("datasets.superimpose is required for model.name='superimpose_net'.")
+            dataset = SuperimposeSourcesDataset(
+                dataset=base_dataset,
+                image_size=args.dataset.image_size,
+                source_pool_size=getattr(args.train, "source_pool_size", None),
+                augment_probability=getattr(args.train, "augment_probability", 1.0),
+                subset_seed=getattr(args.train, "source_subset_seed", 0),
+                samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
+            )
+        else:
+            dataset = PseudoSupervisedDataset(
+                dataset=base_dataset,
+                image_size=args.dataset.image_size,
+                source_pool_size=getattr(args.train, "source_pool_size", None),
+                augment_probability=getattr(args.train, "augment_probability", 1.0),
+                subset_seed=getattr(args.train, "source_subset_seed", 0),
+                samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
+                batch_size=args.train.batch_size,
+                negatives_ratio=getattr(args.train, "negatives_ratio", None),
+            )
         return torch.utils.data.DataLoader(
             dataset=dataset,
             shuffle=False,
@@ -84,30 +93,13 @@ def build_train_loader(args):
             persistent_workers=args.dataloader_kwargs.get("persistent_workers", False),
         )
 
-    train_dataset = get_dataset(
-        transform=get_aug(train=True, **args.aug_kwargs),
-        train=True,
-        **args.dataset_kwargs,
-    )
-    source_pool_size = getattr(args.train, "source_pool_size", None)
-    if source_pool_size is not None:
-        source_subset_seed = getattr(args.train, "source_subset_seed", 0)
-        rng = torch.Generator()
-        rng.manual_seed(source_subset_seed)
-        indices = torch.randperm(len(train_dataset), generator=rng)[:int(source_pool_size)].tolist()
-        train_dataset = torch.utils.data.Subset(train_dataset, indices)
-    samples_per_epoch = getattr(args.train, "samples_per_epoch", None)
-    sampler = None
-    shuffle = True
-    if samples_per_epoch is not None:
-        sampler = torch.utils.data.RandomSampler(
-            train_dataset, replacement=True, num_samples=int(samples_per_epoch)
-        )
-        shuffle = False
     return torch.utils.data.DataLoader(
-        dataset=train_dataset,
-        shuffle=shuffle,
-        sampler=sampler,
+        dataset=get_dataset(
+            transform=get_aug(train=True, **args.aug_kwargs),
+            train=True,
+            **args.dataset_kwargs,
+        ),
+        shuffle=True,
         batch_size=args.train.batch_size,
         **args.dataloader_kwargs,
     )
@@ -116,15 +108,11 @@ def build_train_loader(args):
 def build_eval_loader(args, train):
     dataloader_kwargs = dict(args.dataloader_kwargs)
     dataloader_kwargs["drop_last"] = False
-    # Allow a dedicated kNN eval dataset (e.g. the labeled split when training on the
-    # unlabeled split). Falls back to the training dataset when not configured.
-    knn_dataset_name = getattr(args.dataset, "knn_dataset", args.dataset.name)
-    eval_dataset_kwargs = {**args.dataset_kwargs, "dataset": knn_dataset_name}
     return torch.utils.data.DataLoader(
         dataset=get_dataset(
             transform=get_aug(train=False, train_classifier=False, **args.aug_kwargs),
             train=train,
-            **eval_dataset_kwargs,
+            **args.dataset_kwargs,
         ),
         shuffle=False,
         batch_size=args.train.batch_size,
@@ -147,15 +135,12 @@ def forward_batch(model, batch, device):
 
 
 def build_optimizer_and_scheduler(model, train_loader, args):
-    weight_decay = args.train.optimizer.weight_decay
     optimizer = get_optimizer(
         args.train.optimizer.name,
         model,
         lr=args.train.base_lr * args.train.batch_size / 256,
         momentum=getattr(args.train.optimizer, "momentum", 0.9),
-        weight_decay=weight_decay,
-        beta1=getattr(args.train.optimizer, "beta1", 0.9),
-        beta2=getattr(args.train.optimizer, "beta2", 0.95),
+        weight_decay=args.train.optimizer.weight_decay,
     )
 
     lr_scheduler = LR_Scheduler(
@@ -171,181 +156,11 @@ def build_optimizer_and_scheduler(model, train_loader, args):
     return optimizer, lr_scheduler
 
 
-def load_pretrained_backbone(model, args):
-    """Load backbone weights from a checkpoint.
-
-    Note: this restores backbone parameters only — optimizer state, LR schedule
-    position, and prototype/sigmoid buffers are NOT restored.  This is weight
-    initialisation, not a full training resume.
-    """
-    checkpoint_resume = getattr(args, "checkpoint_resume", None)
-    if checkpoint_resume is None:
-        return
-
-    load_backbone_weights(unwrap_model(model).backbone, checkpoint_resume)
-    print(f"Loaded backbone weights from {checkpoint_resume}")
-
-
-def maybe_refresh_hierarchical_assignments(model, train_loader, epoch, args, device):
-    module = unwrap_model(model)
-    if not hasattr(module, "refresh_assignments"):
-        return {}
-    if getattr(module, "batch_self_labeling", False):
-        return {}
-
-    refresh_interval = int(getattr(args.train, "tree_refresh_interval", 1))
-    if refresh_interval <= 0 or epoch % refresh_interval != 0:
-        return {}
-
-    pseudo_dataset = train_loader.dataset
-    if not hasattr(pseudo_dataset, "source_indices"):
-        raise ValueError("Hierarchical vMF self-labeling requires a pseudo-supervised source pool.")
-
-    source_loader = torch.utils.data.DataLoader(
-        dataset=PseudoSourcePoolDataset(pseudo_dataset),
-        shuffle=False,
-        batch_size=int(getattr(args.train, "tree_refresh_batch_size", args.train.batch_size)),
-        drop_last=False,
-        pin_memory=args.dataloader_kwargs["pin_memory"],
-        num_workers=_get_num_workers(args),
-        persistent_workers=args.dataloader_kwargs.get("persistent_workers", False),
+def save_checkpoint(model, epoch, args):
+    model_path = os.path.join(
+        args.ckpt_dir,
+        f"{args.name}_epoch{epoch + 1}_{datetime.now().strftime('%m%d%H%M%S')}.pth",
     )
-
-    was_training = model.training
-    model.eval()
-    embeddings = []
-    with torch.no_grad():
-        progress = tqdm(
-            source_loader,
-            desc=f"Refreshing hierarchical vMF tree {epoch}",
-            disable=args.hide_progress,
-        )
-        for images, _ in progress:
-            images = images.to(device, non_blocking=True)
-            embeddings.append(module.encode(images).detach().cpu())
-
-    stats = module.refresh_assignments(torch.cat(embeddings, dim=0).to(device))
-    stats_text = ", ".join(f"{key}={value}" for key, value in stats.items())
-    print(f"Refreshed hierarchical vMF self-labels: {stats_text}")
-
-    if was_training:
-        model.train()
-    return stats or {}
-
-
-def maybe_update_depth_annealing(model, epoch, args):
-    """Staircase depth annealing: activate one extra tree level every
-    train.depth_annealing_epochs_per_level epochs, starting from
-    train.depth_annealing_initial_depth (default 1). Levels beyond the active
-    depth are built during refresh/batch self-labeling but receive no loss, so
-    the backbone is never supervised on fine-scale splits of unconsolidated
-    features. Disabled when the config key is absent or null."""
-    module = unwrap_model(model)
-    if not hasattr(module, "set_active_depth"):
-        return
-
-    epochs_per_level = getattr(args.train, "depth_annealing_epochs_per_level", None)
-    if epochs_per_level is None:
-        return
-
-    active_depth = compute_active_depth(
-        epoch=epoch,
-        depth=module.depth,
-        epochs_per_level=epochs_per_level,
-        initial_depth=int(getattr(args.train, "depth_annealing_initial_depth", 1)),
-    )
-    if active_depth != module.active_depth:
-        print(f"Depth annealing: epoch {epoch}, active_depth {module.active_depth} -> {active_depth}")
-    module.set_active_depth(active_depth)
-
-
-def maybe_update_unbalanced_tau(model, epoch, args):
-    """Cosine-anneal the unbalanced-OT marginal penalty tau from
-    train.unbalanced_tau_start to train.unbalanced_tau_final over
-    train.unbalanced_tau_anneal_epochs (start nearly balanced, relax toward
-    natural split ratios as features consolidate). Disabled when
-    unbalanced_tau_final is absent or null — the model then keeps its
-    constructor value: a constant tau, or None = exact balanced Sinkhorn."""
-    module = unwrap_model(model)
-    if not hasattr(module, "set_ot_unbalanced_tau"):
-        return
-    tau_final = getattr(args.train, "unbalanced_tau_final", None)
-    if tau_final is None:
-        return
-    tau = compute_unbalanced_tau(
-        epoch=epoch,
-        tau_start=float(getattr(args.train, "unbalanced_tau_start", tau_final)),
-        tau_final=float(tau_final),
-        anneal_epochs=getattr(args.train, "unbalanced_tau_anneal_epochs", 0),
-    )
-    module.set_ot_unbalanced_tau(tau)
-
-
-def maybe_finalize_tree_node_stats(model):
-    """Fold per-node branch-accuracy accumulators into epoch-level health
-    stats (per-level + overall node accuracy, low-acc streak candidates).
-    Logging-only; returns {} for models without the hierarchical tree."""
-    module = unwrap_model(model)
-    if not hasattr(module, "finalize_node_stats"):
-        return {}
-    return module.finalize_node_stats() or {}
-
-
-def maybe_compute_tree_structure_metrics(model, memory_loader, epoch, args, device):
-    """Per-level purity/NMI between predicted tree-path prefixes and true labels.
-
-    Diagnostic only (peeks at ground-truth labels; nothing feeds back into
-    training). Runs every train.tree_metrics_interval epochs (0/null disables)
-    on up to train.tree_metrics_max_samples clean memory-loader images, using
-    the model's read-only predict_paths descent so no tree state mutates.
-    Returns {} for models without predict_paths."""
-    module = unwrap_model(model)
-    if not hasattr(module, "predict_paths"):
-        return {}
-    interval = int(getattr(args.train, "tree_metrics_interval", 0) or 0)
-    if interval <= 0 or epoch % interval != 0:
-        return {}
-    max_samples = int(getattr(args.train, "tree_metrics_max_samples", 10000))
-
-    was_training = model.training
-    model.eval()
-    features, labels = [], []
-    seen = 0
-    with torch.no_grad():
-        for images, targets in memory_loader:
-            images = images.to(device, non_blocking=True)
-            features.append(module.encode(images).cpu())
-            labels.extend(int(t) for t in targets)
-            seen += images.shape[0]
-            if seen >= max_samples:
-                break
-    if was_training:
-        model.train()
-    if not features:
-        return {}
-
-    embeddings = torch.cat(features, dim=0)[:max_samples]
-    paths = module.predict_paths(embeddings.to(device)).cpu().tolist()
-    radices = getattr(module, "rank_schedule", None)
-    return prefix_label_metrics(paths, labels[:max_samples], radices=radices)
-
-
-def maybe_update_sigmoid_regularization_progress(model, epoch, batch_idx, train_loader, args):
-    module = unwrap_model(model)
-    if not hasattr(module, "set_sigmoid_regularization_progress"):
-        return
-
-    rampup_epochs = float(getattr(args.train, "sigmoid_regularization_rampup_epochs", 0))
-    current_step = epoch * len(train_loader) + batch_idx + 1
-    rampup_steps = int(rampup_epochs * len(train_loader))
-    module.set_sigmoid_regularization_progress(current_step=current_step, rampup_steps=rampup_steps)
-
-
-def save_checkpoint(model, epoch, args, extra_tags=None):
-    tag = ""
-    if extra_tags:
-        tag = "_" + "_".join(str(item) for item in extra_tags)
-    model_path = os.path.join(args.ckpt_dir, f"{args.name}{tag}_{datetime.now().strftime('%m%d%H%M%S')}.pth")
     torch.save(
         {
             "epoch": epoch + 1,
@@ -354,20 +169,9 @@ def save_checkpoint(model, epoch, args, extra_tags=None):
         model_path,
     )
     print(f"Model saved to {model_path}")
-    with open(os.path.join(args.log_dir, "checkpoint_path.txt"), "w+") as f:
-        f.write(f"{model_path}")
+    with open(os.path.join(args.log_dir, "checkpoint_path.txt"), "a") as f:
+        f.write(f"{model_path}\n")
     return model_path
-
-
-def should_save_periodic_checkpoint(epoch, args):
-    checkpoint_saving_frequency = getattr(args.train, "checkpoint_saving_frequency", None)
-    if checkpoint_saving_frequency is None:
-        return False
-    checkpoint_saving_frequency = int(checkpoint_saving_frequency)
-    if checkpoint_saving_frequency <= 0:
-        return False
-    completed_epoch = epoch + 1
-    return completed_epoch % checkpoint_saving_frequency == 0
 
 
 def finalize_log_dir(args):
@@ -388,28 +192,6 @@ def train_model(args, device=None, finalize_logs=False):
         get_model(args.model, num_classes=getattr(train_loader.dataset, "num_pseudo_classes", None)).to(device),
         args,
     )
-
-    # Catch a silently broken configuration: if batch_self_labeling is disabled,
-    # the model relies entirely on the stored assignment paths, which are only
-    # updated by the full-pool refresh.  A tree_refresh_interval of 0 means no
-    # refresh ever happens, so the model trains forever against the initial
-    # round-robin pseudo-labels that have no relation to the actual features.
-    _module = unwrap_model(model)
-    if (
-        hasattr(_module, "batch_self_labeling")
-        and not _module.batch_self_labeling
-        and hasattr(_module, "refresh_assignments")
-        and int(getattr(args.train, "tree_refresh_interval", 0)) <= 0
-    ):
-        raise ValueError(
-            "batch_self_labeling=False requires tree_refresh_interval > 0. "
-            "With tree_refresh_interval=0 the assignment paths are never updated "
-            "from their initial random state, so training is effectively random. "
-            "Either set batch_self_labeling=True or set tree_refresh_interval to a "
-            "positive integer (e.g. 1 to refresh every epoch)."
-        )
-
-    load_pretrained_backbone(model, args)
     optimizer, lr_scheduler = build_optimizer_and_scheduler(model, train_loader, args)
     logger = Logger(
         tensorboard=args.logger.tensorboard,
@@ -418,22 +200,16 @@ def train_model(args, device=None, finalize_logs=False):
     )
 
     accuracy = 0.0
-    epoch = -1  # guard against stop_at_epoch=0 leaving epoch unbound below
+    last_intermediate_ckpt = None
     global_progress = tqdm(range(0, args.train.stop_at_epoch), desc="Training")
-    history = {}
     for epoch in global_progress:
-        maybe_update_depth_annealing(model, epoch, args)
-        maybe_update_unbalanced_tau(model, epoch, args)
-        refresh_stats = maybe_refresh_hierarchical_assignments(model, train_loader, epoch, args, device)
         model.train()
         local_progress = tqdm(
             train_loader,
             desc=f"Epoch {epoch}/{args.train.num_epochs}",
             disable=args.hide_progress,
         )
-        epoch_sums, epoch_batches = {}, 0
-        for batch_idx, batch in enumerate(local_progress):
-            maybe_update_sigmoid_regularization_progress(model, epoch, batch_idx, train_loader, args)
+        for batch in local_progress:
             optimizer.zero_grad(set_to_none=True)
             data_dict = forward_batch(model, batch, device)
             loss = data_dict["loss"].mean()
@@ -441,11 +217,6 @@ def train_model(args, device=None, finalize_logs=False):
             optimizer.step()
             lr_scheduler.step()
             data_dict.update({"lr": lr_scheduler.get_lr()})
-
-            epoch_batches += 1
-            for key, value in data_dict.items():
-                value = value.item() if torch.is_tensor(value) else float(value)
-                epoch_sums[key] = epoch_sums.get(key, 0.0) + value
 
             local_progress.set_postfix({k: v.item() if torch.is_tensor(v) else v for k, v in data_dict.items()})
             logger.update_scalers(data_dict)
@@ -460,56 +231,22 @@ def train_model(args, device=None, finalize_logs=False):
                 hide_progress=args.hide_progress,
             )
 
-        tree_stats = maybe_finalize_tree_node_stats(model)
-        structure_stats = maybe_compute_tree_structure_metrics(model, memory_loader, epoch, args, device)
-        if structure_stats:
-            tree_stats.update(structure_stats)
-        if tree_stats and hasattr(unwrap_model(model), "select_reseed_nodes"):
-            reseeded = unwrap_model(model).select_reseed_nodes()
-            tree_stats["tree_reseeded_nodes"] = float(reseeded)
-            if reseeded:
-                print(f"Selective re-seeding: cold-restarting {reseeded} subtree root(s) at next refresh")
-        current_tau = getattr(unwrap_model(model), "ot_unbalanced_tau", None)
-        if current_tau is not None:
-            tree_stats["ot_unbalanced_tau"] = float(current_tau)
-        if tree_stats:
-            summary = ", ".join(
-                f"{key}={tree_stats[key]:.3f}"
-                for key in ("tree_node_acc_overall", "tree_reseed_candidates")
-                if key in tree_stats
-            )
-            if summary:
-                print(f"Tree health (epoch {epoch}): {summary}")
+        saving_freq = getattr(args.train, "saving_frequency", None)
+        if saving_freq and (epoch + 1) % saving_freq == 0:
+            last_intermediate_ckpt = save_checkpoint(model, epoch, args)
+        else:
+            last_intermediate_ckpt = None
 
-        epoch_dict = {"epoch": epoch, "accuracy": accuracy, **tree_stats}
+        epoch_dict = {"epoch": epoch, "accuracy": accuracy}
         global_progress.set_postfix(epoch_dict)
         logger.update_scalers(epoch_dict)
 
-        # Refresh the monitoring SVGs (training + tree health + tree structure)
-        # every epoch.
-        epoch_means = {key: total / max(epoch_batches, 1) for key, total in epoch_sums.items()}
-        append_history(history, {**epoch_means, **refresh_stats, **tree_stats, "epoch": epoch, "accuracy": accuracy})
-        try:
-            save_training_monitor_svg(history, os.path.join(args.log_dir, "monitor_training.svg"))
-            if any(key.startswith("tree_") or key == "active_depth" for key in history):
-                save_tree_health_monitor_svg(history, os.path.join(args.log_dir, "monitor_tree_health.svg"))
-            if any(key.startswith("tree_purity_level") for key in history):
-                save_tree_structure_monitor_svg(history, os.path.join(args.log_dir, "monitor_tree_structure.svg"))
-        except Exception as exc:
-            print(f"Monitoring plot update failed (non-fatal): {exc}")
-
-        if should_save_periodic_checkpoint(epoch, args):
-            save_checkpoint(
-                model,
-                epoch,
-                args,
-                extra_tags=[
-                    f"epoch_{epoch + 1}",
-                    f"knn_acc{accuracy:.2f}",
-                ],
-            )
-
-    model_path = save_checkpoint(model, epoch, args)
+    # Save final checkpoint unless the last epoch was already saved by saving_frequency.
+    saving_freq = getattr(args.train, "saving_frequency", None)
+    if saving_freq and args.train.stop_at_epoch % saving_freq == 0:
+        model_path = last_intermediate_ckpt
+    else:
+        model_path = save_checkpoint(model, epoch, args)
 
     if args.eval is not False:
         args.eval_from = model_path
@@ -525,6 +262,397 @@ def train_model(args, device=None, finalize_logs=False):
 
 def main(device, args):
     return train_model(args=args, device=device, finalize_logs=False)
+
+
+def build_train_loader_for_episode(args, episode_indices):
+    """Build a train loader for a single meta-loop episode using explicit indices."""
+    base_dataset = get_dataset(
+        transform=None,
+        train=True,
+        **args.dataset_kwargs,
+    )
+    dataset = PseudoSupervisedDataset(
+        dataset=base_dataset,
+        image_size=args.dataset.image_size,
+        source_pool_size=None,
+        augment_probability=getattr(args.train, "augment_probability", 1.0),
+        explicit_indices=episode_indices,
+        samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
+        batch_size=args.train.batch_size,
+        negatives_ratio=getattr(args.train, "negatives_ratio", None),
+    )
+    return torch.utils.data.DataLoader(
+        dataset=dataset,
+        shuffle=False,
+        batch_size=args.train.batch_size,
+        drop_last=args.dataloader_kwargs["drop_last"],
+        pin_memory=args.dataloader_kwargs["pin_memory"],
+        num_workers=_get_num_workers(args),
+        persistent_workers=args.dataloader_kwargs.get("persistent_workers", False),
+    )
+
+
+def build_optimizer_and_scheduler_for_meta(model, train_loader, args, total_num_epochs, start_iter=0):
+    """Build optimizer and LR scheduler with support for global meta-loop scheduling."""
+    optimizer = get_optimizer(
+        args.train.optimizer.name,
+        model,
+        lr=args.train.base_lr * args.train.batch_size / 256,
+        momentum=getattr(args.train.optimizer, "momentum", 0.9),
+        weight_decay=args.train.optimizer.weight_decay,
+    )
+    lr_scheduler = LR_Scheduler(
+        optimizer,
+        args.train.warmup_epochs,
+        args.train.warmup_lr * args.train.batch_size / 256,
+        total_num_epochs,
+        args.train.base_lr * args.train.batch_size / 256,
+        args.train.final_lr * args.train.batch_size / 256,
+        len(train_loader),
+        constant_predictor_lr=True,
+        start_iter=start_iter,
+    )
+    return optimizer, lr_scheduler
+
+
+def _split_backbone_head_optimizers(model, train_loader, args, total_num_epochs, start_iter=0):
+    """Create separate backbone and classifier-head optimizers with independent LR schedules.
+
+    Used when ``reset_classifier_head=True`` and ``global_lr_schedule=True``.
+    The backbone optimizer follows the global schedule (spanning all episodes).
+    The classifier-head optimizer uses a fresh per-episode warmup+cosine schedule
+    so that the re-initialised head always starts training from a high LR rather
+    than the low LR the global schedule may have reached by that episode.
+    """
+    head = get_classifier_head(model)
+    if head is None:
+        raise ValueError("The model does not expose a classifier head for split optimization.")
+    head_ids = {id(p) for p in head.parameters()}
+
+    lr = args.train.base_lr * args.train.batch_size / 256
+    warmup_lr = args.train.warmup_lr * args.train.batch_size / 256
+    final_lr = args.train.final_lr * args.train.batch_size / 256
+    momentum = getattr(args.train.optimizer, "momentum", 0.9)
+    wd = args.train.optimizer.weight_decay
+    opt_name = args.train.optimizer.name
+    iters_per_epoch = len(train_loader)
+
+    backbone_params = [p for p in model.parameters() if id(p) not in head_ids]
+    head_params = list(head.parameters())
+
+    def _make_opt(params):
+        if opt_name == "sgd":
+            return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=wd)
+        elif opt_name == "lars":
+            from optimizers import LARS as _LARS
+            return _LARS(params, lr=lr, momentum=momentum, weight_decay=wd)
+        elif opt_name == "larc":
+            from optimizers import LARC as _LARC
+            return _LARC(
+                torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=wd),
+                trust_coefficient=0.001,
+                clip=False,
+            )
+        else:
+            raise NotImplementedError(
+                f"Optimizer '{opt_name}' is not supported for split backbone/head scheduling."
+            )
+
+    backbone_opt = _make_opt(backbone_params)
+    head_opt = _make_opt(head_params)
+
+    backbone_scheduler = LR_Scheduler(
+        backbone_opt,
+        args.train.warmup_epochs,
+        warmup_lr,
+        total_num_epochs,
+        lr,
+        final_lr,
+        iters_per_epoch,
+        constant_predictor_lr=False,
+        start_iter=start_iter,
+    )
+    # Fresh per-episode schedule for the classifier head.
+    head_scheduler = LR_Scheduler(
+        head_opt,
+        args.train.warmup_epochs,
+        warmup_lr,
+        args.train.num_epochs,
+        lr,
+        final_lr,
+        iters_per_epoch,
+        constant_predictor_lr=False,
+    )
+    return backbone_opt, backbone_scheduler, head_opt, head_scheduler
+
+
+def meta_train_model(
+    args,
+    device=None,
+    resume_from_episode=0,
+    resume_checkpoint=None,
+    resume_mother_log_dir=None,
+    resume_mother_ckpt_dir=None,
+):
+    """Train the pseudo-supervised model with a meta-loop over the full dataset.
+
+    Each episode samples a fixed-size window from the globally-shuffled dataset,
+    optionally overlapping with the previous episode.  The model checkpoint from
+    one episode is loaded as the starting point for the next.
+
+    To resume a previously interrupted run:
+        - ``resume_from_episode``: 0-based index of the episode to restart from.
+        - ``resume_checkpoint``: path to the ``.pth`` file saved at the end of
+          episode ``resume_from_episode - 1``.
+        - ``resume_mother_log_dir`` / ``resume_mother_ckpt_dir``: paths to the
+          mother directories created during the original run so that new episode
+          sub-folders are written into the same tree.
+    """
+    device = device or args.device
+
+    meta_cfg = getattr(args, "meta", None)
+    if meta_cfg is None:
+        raise ValueError("'meta' section is required in the config for meta_train_model.")
+
+    episode_size = int(meta_cfg.episode_size)
+    overlap_ratio = float(getattr(meta_cfg, "overlap_ratio", 0.0))
+    shuffle_seed = int(getattr(meta_cfg, "dataset_shuffle_seed", 42))
+    reset_head = bool(getattr(meta_cfg, "reset_classifier_head", False))
+    global_lr = bool(getattr(meta_cfg, "global_lr_schedule", True))
+
+    # Determine total dataset size using a throw-away dataset object.
+    base_dataset = get_dataset(transform=None, train=True, **args.dataset_kwargs)
+    total_size = len(base_dataset)
+    del base_dataset
+
+    sampling_mode = getattr(meta_cfg, "sampling_mode", "sequential")
+    if sampling_mode == "random":
+        num_episodes = int(meta_cfg.num_episodes)
+        stride = None
+        perm = None
+    else:
+        stride = max(1, int(episode_size * (1.0 - overlap_ratio)))
+        if total_size <= episode_size:
+            num_episodes = 1
+        else:
+            num_episodes = math.ceil((total_size - episode_size) / stride) + 1
+        # Globally shuffle the dataset indices for reproducibility.
+        generator = torch.Generator().manual_seed(shuffle_seed)
+        perm = torch.randperm(total_size, generator=generator).tolist()
+
+    # Create or reuse the mother output directory.
+    if resume_mother_log_dir is not None or resume_mother_ckpt_dir is not None:
+        if resume_mother_log_dir is None or resume_mother_ckpt_dir is None:
+            raise ValueError(
+                "Both resume_mother_log_dir and resume_mother_ckpt_dir must be provided together."
+            )
+        mother_log_dir = resume_mother_log_dir
+        mother_ckpt_dir = resume_mother_ckpt_dir
+        os.makedirs(mother_log_dir, exist_ok=True)
+        os.makedirs(mother_ckpt_dir, exist_ok=True)
+    else:
+        timestamp = datetime.now().strftime("%m%d%H%M%S")
+        mother_name = f"{timestamp}_meta_training_{args.dataset.name}"
+        mother_ckpt_dir = os.path.join(args.ckpt_dir, mother_name)
+        mother_log_dir = os.path.join(args.log_dir, mother_name)
+        os.makedirs(mother_ckpt_dir, exist_ok=True)
+        os.makedirs(mother_log_dir, exist_ok=True)
+
+    # Save the merged runtime config into the mother log directory for reference.
+    save_effective_config(args, mother_log_dir)
+
+    resuming = resume_from_episode > 0 or resume_checkpoint is not None
+    if sampling_mode == "random":
+        mode_info = f"sampling=random | num_episodes={num_episodes}"
+    else:
+        mode_info = f"overlap={overlap_ratio:.0%} | stride={stride}"
+    print(
+        f"Meta-training: {num_episodes} episodes | episode_size={episode_size} | "
+        f"{mode_info} | total_dataset={total_size}"
+        + (f" | resuming from episode {resume_from_episode}" if resuming else "")
+    )
+
+    last_checkpoint = resume_checkpoint
+    model = None
+    global_iter_offset = 0
+    global_total_epochs = num_episodes * args.train.num_epochs if global_lr else None
+
+    # When resuming with global LR scheduling, fast-forward the iter offset to
+    # match where the interrupted run would have been.
+    if global_lr and resume_from_episode > 0:
+        dummy_indices = list(range(episode_size)) if perm is None else perm[:episode_size]
+        temp_loader = build_train_loader_for_episode(args, dummy_indices)
+        global_iter_offset = resume_from_episode * len(temp_loader) * args.train.num_epochs
+        del temp_loader
+
+    results = []
+
+    # A single logger that accumulates data across *all* episodes so that the
+    # saved plot always shows the full training history up to the latest step.
+    meta_logger = Logger(
+        tensorboard=False,
+        matplotlib=args.logger.matplotlib,
+        log_dir=mother_log_dir,
+    )
+
+    for episode_idx in range(resume_from_episode, num_episodes):
+        print(f"\n--- Episode {episode_idx + 1}/{num_episodes} ---")
+
+        # Compute per-episode indices.
+        if sampling_mode == "random":
+            ep_gen = torch.Generator().manual_seed(shuffle_seed + episode_idx)
+            episode_indices = torch.randperm(total_size, generator=ep_gen)[:episode_size].tolist()
+        else:
+            start = episode_idx * stride
+            end = min(start + episode_size, total_size)
+            episode_indices = perm[start:end]
+
+        # Build loaders.
+        train_loader = build_train_loader_for_episode(args, episode_indices)
+        memory_loader = build_eval_loader(args, train=True)
+        test_loader = build_eval_loader(args, train=False)
+
+        # Derive per-episode directories.
+        episode_dir = os.path.join(mother_log_dir, f"episode_{episode_idx}")
+        episode_ckpt_dir = os.path.join(mother_ckpt_dir, f"episode_{episode_idx}")
+        os.makedirs(episode_dir, exist_ok=True)
+        os.makedirs(episode_ckpt_dir, exist_ok=True)
+
+        num_pseudo_classes = train_loader.dataset.num_pseudo_classes
+
+        if model is None:
+            # Build model (fresh start or first episode after resuming).
+            model = maybe_data_parallel(
+                get_model(args.model, num_classes=num_pseudo_classes).to(device),
+                args,
+            )
+
+        # Load checkpoint: either a resume checkpoint (first iteration of a
+        # resumed run) or the checkpoint saved at the end of the previous episode.
+        if last_checkpoint is not None:
+            state = torch.load(last_checkpoint, map_location=device)
+            unwrap_model(model).load_state_dict(state["state_dict"])
+            if reset_head:
+                reset_classifier_head(model)
+
+        # Build optimizer + LR scheduler.
+        # Split backbone and head optimizers when optimizer_separate=True (explicit)
+        # or when global_lr + reset_head (existing automatic behavior).
+        optimizer_separate = bool(getattr(args.train, "optimizer_separate", False))
+        use_split_head = (
+            (optimizer_separate or (global_lr and reset_head))
+            and get_classifier_head(model) is not None
+        )
+        if use_split_head:
+            total_ep = global_total_epochs if global_lr else args.train.num_epochs
+            start_it = global_iter_offset if global_lr else 0
+            optimizer, lr_scheduler, head_optimizer, head_lr_scheduler = (
+                _split_backbone_head_optimizers(
+                    model, train_loader, args,
+                    total_num_epochs=total_ep,
+                    start_iter=start_it,
+                )
+            )
+        elif global_lr:
+            optimizer, lr_scheduler = build_optimizer_and_scheduler_for_meta(
+                model,
+                train_loader,
+                args,
+                total_num_epochs=global_total_epochs,
+                start_iter=global_iter_offset,
+            )
+            head_optimizer = head_lr_scheduler = None
+        else:
+            optimizer, lr_scheduler = build_optimizer_and_scheduler(model, train_loader, args)
+            head_optimizer = head_lr_scheduler = None
+
+        # Per-episode args proxy for save_checkpoint / Logger.
+        episode_args = copy.copy(args)
+        episode_args.log_dir = episode_dir
+        episode_args.ckpt_dir = episode_ckpt_dir
+        episode_args.name = f"episode_{episode_idx}"
+
+        logger = Logger(
+            tensorboard=args.logger.tensorboard,
+            matplotlib=args.logger.matplotlib,
+            log_dir=episode_dir,
+        )
+
+        accuracy = 0.0
+        last_intermediate_ckpt = None
+        global_progress = tqdm(range(0, args.train.stop_at_epoch), desc=f"Episode {episode_idx}")
+        for epoch in global_progress:
+            model.train()
+            local_progress = tqdm(
+                train_loader,
+                desc=f"Epoch {epoch}/{args.train.num_epochs}",
+                disable=args.hide_progress,
+            )
+            for batch in local_progress:
+                optimizer.zero_grad(set_to_none=True)
+                if head_optimizer is not None:
+                    head_optimizer.zero_grad(set_to_none=True)
+                data_dict = forward_batch(model, batch, device)
+                loss = data_dict["loss"].mean()
+                loss.backward()
+                optimizer.step()
+                lr_scheduler.step()
+                if head_optimizer is not None:
+                    head_optimizer.step()
+                    head_lr_scheduler.step()
+                if global_lr:
+                    global_iter_offset += 1
+                data_dict.update({"lr": lr_scheduler.get_lr()})
+                local_progress.set_postfix(
+                    {k: v.item() if torch.is_tensor(v) else v for k, v in data_dict.items()}
+                )
+                logger.update_scalers(data_dict)
+                meta_logger.update_scalers(data_dict)
+
+            if args.train.knn_monitor and epoch % args.train.knn_interval == 0:
+                accuracy = knn_monitor(
+                    unwrap_model(model).backbone,
+                    memory_loader,
+                    test_loader,
+                    device=device,
+                    k=min(args.train.knn_k, len(memory_loader.dataset)),
+                    hide_progress=args.hide_progress,
+                )
+
+            saving_freq = getattr(args.train, "saving_frequency", None)
+            if saving_freq and (epoch + 1) % saving_freq == 0:
+                last_intermediate_ckpt = save_checkpoint(model, epoch, episode_args)
+            else:
+                last_intermediate_ckpt = None
+
+            epoch_dict = {"epoch": epoch, "accuracy": accuracy}
+            global_progress.set_postfix(epoch_dict)
+            logger.update_scalers(epoch_dict)
+            meta_logger.update_scalers(epoch_dict)
+
+        # Save end-of-episode checkpoint unless already saved by saving_frequency.
+        saving_freq = getattr(args.train, "saving_frequency", None)
+        if saving_freq and args.train.stop_at_epoch % saving_freq == 0:
+            last_checkpoint = last_intermediate_ckpt
+        else:
+            last_checkpoint = save_checkpoint(model, epoch, episode_args)
+        results.append(
+            {
+                "episode": episode_idx,
+                "model_path": last_checkpoint,
+                "accuracy": accuracy,
+                "log_dir": episode_dir,
+            }
+        )
+
+    return {
+        "episodes": results,
+        "final_model_path": last_checkpoint,
+        "final_accuracy": results[-1]["accuracy"] if results else None,
+        "mother_log_dir": mother_log_dir,
+        "mother_ckpt_dir": mother_ckpt_dir,
+        "meta_plot": os.path.join(mother_log_dir, "plotter.svg"),
+    }
 
 
 if __name__ == "__main__":

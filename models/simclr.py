@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import resnet50
 
 def NT_XentLoss(z1, z2, temperature=0.5):
     z1 = F.normalize(z1, dim=1)
@@ -42,10 +43,9 @@ class projection_MLP(nn.Module):
 
 class SimCLR(nn.Module):
 
-    def __init__(self, backbone=None):
+    def __init__(self, backbone=resnet50()):
         super().__init__()
-        if backbone is None:
-            raise ValueError("backbone must be provided explicitly.")
+        
         self.backbone = backbone
         self.projector = projection_MLP(backbone.output_dim)
         self.encoder = nn.Sequential(

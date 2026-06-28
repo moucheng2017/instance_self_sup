@@ -1,0 +1,79 @@
+name: meta-pseudo-supervised-cifar10-random
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  name: pseudo_supervised_net
+  backbone: resnet18
+  cosine_softmax: False
+  cosine_scale: 16.0
+  l2_norm_backbone_features: False
+
+train:
+  optimizer:
+    name: sgd
+    weight_decay: 0.0005
+    momentum: 0.9
+  warmup_epochs: 5
+  warmup_lr: 0
+  base_lr: 0.03
+  final_lr: 0
+  num_epochs: 100
+  stop_at_epoch: 100
+  batch_size: 128
+  # Fraction of each batch sampled as unique negative image identities. The
+  # remainder is filled with extra augmented views of those identities.
+  negatives_ratio: 0.5
+  augment_probability: 1.0
+  knn_monitor: True
+  knn_interval: 1
+  knn_k: 200
+  use_data_parallel: False
+  samples_per_epoch: null
+  # If True, the backbone and classification head use separate optimizers and LR
+  # schedulers.  If False, a single optimizer trains the whole network.
+  optimizer_separate: False
+  # If set to a positive integer, a checkpoint is saved after every
+  # saving_frequency epochs within each episode (in addition to the
+  # end-of-episode checkpoint).  Set to null to save only at episode end.
+  saving_frequency: null
+
+# Linear evaluation settings (used by linear_eval.py)
+eval:
+  optimizer:
+    name: sgd
+    weight_decay: 0.0
+    momentum: 0.9
+  warmup_epochs: 0
+  warmup_lr: 0
+  base_lr: 0.3
+  final_lr: 0
+  num_epochs: 90
+  batch_size: 256
+  use_data_parallel: False
+
+# Meta-loop settings
+meta:
+  # Sampling mode: 'random' randomly samples episode_size images per episode.
+  # 'sequential' (default) uses a sliding window with overlap_ratio.
+  sampling_mode: random
+
+  # Number of unique images randomly sampled per episode.
+  episode_size: 10000
+
+  # Total number of episodes (only used when sampling_mode is 'random').
+  num_episodes: 10
+
+  # Random seed used to make per-episode random sampling reproducible.
+  dataset_shuffle_seed: 42
+
+  # If true, randomly re-initialise the classification head at the start of
+  # each episode (the backbone weights are still loaded from the last checkpoint).
+  reset_classifier_head: False
+
+  # If true, the LR is scheduled across the entire meta-loop (all episodes
+  # treated as one long training run).  If false, the LR scheduler is reset
+  # at the beginning of each episode.
+  global_lr_schedule: True

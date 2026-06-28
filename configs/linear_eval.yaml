@@ -1,0 +1,37 @@
+name: linear-eval-cifar10
+
+# ── Local runtime paths (used by local_scripts/run_linear_eval_local.sh) ──────
+# Set these once and just run the script with no env vars.
+# Any value here is overridden if the corresponding env var is set.
+local:
+  eval_from: "/Users/xmc28/Desktop/projects/checkpoints/pseudo_sup/exps/episode_4_0614005423.pth"        # path to the .pth checkpoint to evaluate (input)
+  data_dir:  "/Users/xmc28/Desktop/projects/data/"  # parent directory of cifar-10-batches-py
+  save_dir:  "/Users/xmc28/Desktop/projects/ssl_linear_eval_runs"  # where the timestamped run folder is created
+  device:    "mps"
+# ──────────────────────────────────────────────────────────────────────────────
+
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  # Must match the backbone used during pre-training.
+  name: pseudo_supervised_net
+  backbone: resnet18
+  # Set True to L2-normalise backbone features before the linear head,
+  # matching whatever was done during pre-training.
+  l2_norm_backbone_features: True
+
+eval:
+  optimizer:
+    name: sgd
+    weight_decay: 0.0
+    momentum: 0.9
+  warmup_epochs: 0
+  warmup_lr: 0
+  base_lr: 3
+  final_lr: 0
+  num_epochs: 100
+  batch_size: 512
+  use_data_parallel: False

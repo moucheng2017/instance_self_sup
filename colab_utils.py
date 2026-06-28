@@ -2,7 +2,7 @@ import os
 
 from arguments import build_args
 from linear_eval import main as run_linear_eval
-from main import train_model
+from main import meta_train_model, train_model
 
 
 def is_running_in_colab():
@@ -152,3 +152,53 @@ def linear_eval_from_colab(
     args.eval_from = checkpoint_path
     accuracy = run_linear_eval(args)
     return {"accuracy": accuracy, "paths": paths}
+
+
+def meta_train_from_colab(
+    config_file,
+    project_name="SSL_exps",
+    use_drive=True,
+    drive_mount_point="/content/drive",
+    overrides=None,
+    device="cuda",
+    debug=False,
+    download=True,
+    hide_progress=False,
+    resume_from_episode=0,
+    resume_checkpoint=None,
+    resume_mother_log_dir=None,
+    resume_mother_ckpt_dir=None,
+):
+    """Run the meta pseudo-supervised training loop from a Colab notebook.
+
+    The config must contain a ``meta`` section with at least ``episode_size``.
+    See ``configs/meta_pseudo_supervised_cifar_colab.yaml`` for an example.
+
+    To resume an interrupted run pass:
+        - ``resume_from_episode``: 0-based index of the episode to restart from.
+        - ``resume_checkpoint``: full path to the checkpoint saved at the end of
+          episode ``resume_from_episode - 1``.
+        - ``resume_mother_log_dir`` / ``resume_mother_ckpt_dir``: the mother
+          directory paths printed when the original run started.
+    """
+    args, paths = build_colab_args(
+        config_file=config_file,
+        project_name=project_name,
+        use_drive=use_drive,
+        drive_mount_point=drive_mount_point,
+        overrides=overrides,
+        device=device,
+        debug=debug,
+        download=download,
+        hide_progress=hide_progress,
+    )
+    result = meta_train_model(
+        args=args,
+        device=args.device,
+        resume_from_episode=resume_from_episode,
+        resume_checkpoint=resume_checkpoint,
+        resume_mother_log_dir=resume_mother_log_dir,
+        resume_mother_ckpt_dir=resume_mother_ckpt_dir,
+    )
+    result["paths"] = paths
+    return result

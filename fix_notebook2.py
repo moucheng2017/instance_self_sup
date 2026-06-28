@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 cells = []
 
@@ -9,7 +8,7 @@ cells.append({
     "id": "c120fdec",
     "metadata": {},
     "source": [
-        '<a href="https://colab.research.google.com/github/moucheng2017/my_simsiam/blob/53-recursive-self-labelling-sigmoid-loss/notebooks/hierarchical-balanced-vmf-cifar10-ssl.ipynb" target="_parent">'
+        '<a href="https://colab.research.google.com/github/moucheng2017/my_simsiam/blob/2-predict-superimpose-sources/Google_Colab_superimpose_source_prediction.ipynb" target="_parent">'
         '<img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>'
     ]
 })
@@ -20,11 +19,11 @@ cells.append({
     "id": "c9fa8429",
     "metadata": {},
     "source": [
-        "# Hierarchical Balanced vMF Self-Labeling on Google Colab\n",
+        "# Predict Superimposed Image Sources on Google Colab\n",
         "\n",
-        "This notebook follows the existing Colab flow and trains the current hierarchical balanced vMF self-labeling experiment.\n",
+        "This notebook follows the existing Colab flow and trains a network to predict which two images were superimposed to create each training sample.\n",
         "\n",
-        "Images are encoded into L2-normalized embeddings, batch-local OT/vMF labels are fitted from detached features, and the model predicts the discovered hierarchical path with optional sigmoid image-index regularization.\n",
+        "A fixed subset of `train.source_pool_size` images is selected from the dataset and pseudo-labeled by position in that subset: `0, 1, ..., N-1`. During training, two distinct images are sampled from that subset, optionally augmented, averaged into one superimposed image, and passed through a shared backbone with two classification heads. Because averaging is order-invariant, the sampled pair is sorted by pseudo label before supervision so the first head predicts the lower pseudo-label index and the second head predicts the higher one.\n",
         "\n",
         "If the GitHub repository is private, create a GitHub fine-grained personal access token with repository read access and paste it when prompted in the setup cell."
     ]
@@ -61,7 +60,7 @@ cells.append({
         "from urllib.parse import quote\n",
         "\n",
         "PUBLIC_REPO_URL = 'https://github.com/moucheng2017/my_simsiam.git'\n",
-        "BRANCH = '53-recursive-self-labelling-sigmoid-loss'\n",
+        "BRANCH = '2-predict-superimpose-sources'\n",
         "REPO_DIR = Path('/content/my_simsiam')\n",
         "GITHUB_TOKEN = \"\"  # Set to a token string here if the repo is private.\n",
         "\n",
@@ -135,23 +134,24 @@ cells.append({
     "source": [
         "from colab_utils import train_from_colab\n",
         "\n",
-        "hierarchical_balanced_vmf_result = train_from_colab(\n",
-        "    config_file='configs/hierarchical_balanced_vmf_cifar_colab.yaml',\n",
+        "superimpose_result = train_from_colab(\n",
+        "    config_file='configs/superimpose_sources_cifar_colab.yaml',\n",
         "    project_name='SSL_exps',\n",
         "    use_drive=True,\n",
         "    device='cuda',\n",
         "    download=True,\n",
         "    overrides={\n",
         "        'train': {\n",
-        "            'batch_size': 512,\n",
-        "            'source_pool_size': 50000,\n",
+        "            'batch_size': 2048,\n",
+        "            'source_pool_size': 1000,\n",
+        "            'augment_probability': 0.5,\n",
         "            'source_subset_seed': 0,\n",
-        "            'num_epochs': 100,\n",
-        "            'stop_at_epoch': 100\n",
+        "            'num_epochs': 800,\n",
+        "            'stop_at_epoch': 800\n",
         "        }\n",
         "    },\n",
         ")\n",
-        "hierarchical_balanced_vmf_result\n"
+        "superimpose_result\n"
     ]
 })
 
@@ -165,7 +165,7 @@ nb = {
     "cells": cells
 }
 
-path = str(Path("notebooks") / "hierarchical-balanced-vmf-cifar10-ssl-generated.ipynb")
+path = '/Users/xmc28/Desktop/projects/my_simsiam/Google_Colab_superimpose_source_prediction.ipynb'
 with open(path, 'w') as f:
     json.dump(nb, f, indent=1)
 

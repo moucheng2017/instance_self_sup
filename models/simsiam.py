@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F 
+from torchvision.models import resnet50
 
 
 def D(p, z, version='simplified'): # negative cosine similarity
@@ -86,10 +87,9 @@ class prediction_MLP(nn.Module):
         return x 
 
 class SimSiam(nn.Module):
-    def __init__(self, backbone=None):
+    def __init__(self, backbone=resnet50()):
         super().__init__()
-        if backbone is None:
-            raise ValueError("backbone must be provided explicitly.")
+        
         self.backbone = backbone
         self.projector = projection_MLP(backbone.output_dim)
 

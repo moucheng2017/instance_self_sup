@@ -5,7 +5,7 @@ import torch
 from .lr_scheduler import LR_Scheduler
 
 
-def get_optimizer(name, model, lr, momentum, weight_decay, beta1=0.9, beta2=0.95):
+def get_optimizer(name, model, lr, momentum, weight_decay):
 
     predictor_prefix = ('module.predictor', 'predictor')
     parameters = [{
@@ -21,8 +21,6 @@ def get_optimizer(name, model, lr, momentum, weight_decay, beta1=0.9, beta2=0.95
         optimizer = LARS(parameters, lr=lr, momentum=momentum, weight_decay=weight_decay)
     elif name == 'sgd':
         optimizer = torch.optim.SGD(parameters, lr=lr, momentum=momentum, weight_decay=weight_decay)
-    elif name == 'adam':
-        optimizer = torch.optim.Adam(parameters, lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
     elif name == 'lars_simclr': # Careful
         optimizer = LARS_simclr(model.named_modules(), lr=lr, momentum=momentum, weight_decay=weight_decay)
     elif name == 'larc':
@@ -39,5 +37,6 @@ def get_optimizer(name, model, lr, momentum, weight_decay, beta1=0.9, beta2=0.95
     else:
         raise NotImplementedError
     return optimizer
+
 
 

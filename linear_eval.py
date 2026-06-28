@@ -42,25 +42,12 @@ def load_backbone_weights(model, checkpoint_path):
 def main(args):
     dataloader_kwargs = dict(args.dataloader_kwargs)
     dataloader_kwargs["drop_last"] = False
-    train_dataset = get_dataset(
-        transform=get_aug(train=False, train_classifier=True, **args.aug_kwargs),
-        train=True,
-        **args.dataset_kwargs,
-    )
-    source_pool_size = getattr(args.eval, "source_pool_size", None)
-    if source_pool_size is not None:
-        source_pool_size = int(source_pool_size)
-        if source_pool_size < 1:
-            raise ValueError("eval.source_pool_size must be at least 1.")
-        if source_pool_size > len(train_dataset):
-            raise ValueError("eval.source_pool_size cannot exceed the training dataset size.")
-        source_subset_seed = getattr(args.eval, "source_subset_seed", 0)
-        rng = torch.Generator()
-        rng.manual_seed(source_subset_seed)
-        indices = torch.randperm(len(train_dataset), generator=rng)[:source_pool_size].tolist()
-        train_dataset = torch.utils.data.Subset(train_dataset, indices)
     train_loader = torch.utils.data.DataLoader(
-        dataset=train_dataset,
+        dataset=get_dataset(
+            transform=get_aug(train=False, train_classifier=True, **args.aug_kwargs),
+            train=True,
+            **args.dataset_kwargs,
+        ),
         batch_size=args.eval.batch_size,
         shuffle=True,
         **dataloader_kwargs,
@@ -121,7 +108,8 @@ def main(args):
             optimizer.zero_grad(set_to_none=True)
             with torch.no_grad():
                 feature = model(images.to(args.device, non_blocking=True))
-
+            if getattr(args.model, "l2_norm_backbone_features", False):
+                feature = F.normalize(feature, dim=1)
             preds = classifier(feature)
             loss = F.cross_entropy(preds, labels.to(args.device, non_blocking=True))
             loss.backward()
@@ -135,9 +123,11 @@ def main(args):
     for images, labels in test_loader:
         with torch.no_grad():
             feature = model(images.to(args.device, non_blocking=True))
+            if getattr(args.model, "l2_norm_backbone_features", False):
+                feature = F.normalize(feature, dim=1)
             preds = classifier(feature).argmax(dim=1)
             correct = (preds == labels.to(args.device, non_blocking=True)).sum().item()
-            acc_meter.update(correct / preds.shape[0], n=preds.shape[0])
+            acc_meter.update(correct / preds.shape[0])
 
     final_accuracy = acc_meter.avg * 100
     print(f"Accuracy = {final_accuracy:.2f}")
