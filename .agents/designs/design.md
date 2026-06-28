@@ -10,14 +10,15 @@
 
 `idea.md` Section 2.1 is the **week-1 go/no-go experiment**. It asks: do VICReg and Barlow Twins — methods that explicitly decorrelate features — reach the same *effective rank* and KNN accuracy as `pseudo_sup` in the low-data regime (N ≤ 1000)? Both outcomes are publishable, so the job is to produce a *trustworthy, reproducible* comparison, not to win a benchmark.
 
-This branch is responsible for exactly two things:
+This branch is responsible for:
 
 1. **Two new pretraining methods** — VICReg and Barlow Twins — that train from random init and plug into the existing `main.train_model` loop with no special-casing beyond model/aug registration.
-2. **Colab notebooks** that run those methods on CIFAR-10 (and optionally STL-10) across the N-sweep, then report the Section 2.1 metrics: effective rank of the penultimate-layer feature matrix, KNN accuracy (k=20), and the top-20 singular values.
+2. **A baseline suite of Colab notebooks** — one per compared method (`pseudo_sup`, VICReg, Barlow Twins, SimCLR, SimSiam) — that run the N-sweep and report the Section 2.1 metrics: effective rank of the penultimate-layer feature matrix, KNN accuracy (k=20), and the top-20 singular values. The four feature-decorrelation/contrastive methods share one LARS optimizer and schedule for parity; `pseudo_sup` reproduces a single episode of the meta notebook under its own native recipe (see below and §3.6).
+3. **A checkpoint-initialization option** exposed by every notebook (and all five configs): start training from a saved checkpoint, loading the backbone by default and optionally the projector and predictor (§3.7). This is what enables idea.md's proposed "SimCLR + pseudo_sup init" method.
 
-SimCLR and SimSiam already exist (`models/simclr.py`, `models/simsiam.py`) and are reused as comparison points — do not reimplement them. `pseudo_sup` is the existing `pseudo_supervised_net`. The spectrum-surgery experiments (idea.md Section 2.2) are **out of scope** for this branch, but the spectral-diagnostics module built here is the shared foundation for them, so build it cleanly.
+SimCLR and SimSiam already exist (`models/simclr.py`, `models/simsiam.py`) and are reused as-is — do not reimplement or modify them; they only get new baseline configs and notebooks. `pseudo_sup` is the existing `pseudo_supervised_net`; it gets a baseline notebook that reproduces **one episode** of `notebooks/random-meta-cifar10-ssl.ipynb` (its native SGD pseudo-supervised recipe — *not* LARS), trained on the same shared N-pool as the others so it stays directly comparable. The spectrum-surgery experiments (idea.md Section 2.2) are **out of scope** for this branch, but the spectral-diagnostics module built here is the shared foundation for them, so build it cleanly. STL-10 is **out of scope** for this branch (deferred to separate work); build CIFAR-10 only.
 
-Keep changes additive and minimal. Do not modify the core epoch loop, argument parsing, or existing model implementations. The only existing-code edits allowed are the registration hooks listed below plus the narrowly scoped, tested low-data subset plumbing in `main.build_train_loader` / dataset helpers described in §3.5.
+Keep changes additive and minimal. Do not modify the core epoch loop, argument parsing, or existing model implementations. The only existing-code edits allowed are the registration hooks listed below, the narrowly scoped tested low-data subset plumbing in `main.build_train_loader` / dataset helpers (§3.5), and the tested checkpoint-init call added to `main.train_model` (§3.7).
 
 ---
 
@@ -34,14 +35,15 @@ Read these files before writing code; the new methods must conform to the conven
 **Registration points and allowed existing-code edits**:
 - `models/__init__.py` → add `elif model_cfg.name == 'vicreg'/'barlow_twins'` branches in `get_model`, importing the new classes.
 - `augmentations/__init__.py` → add `name` handling in `get_aug` for the new methods.
-- `main.py` / dataset helper code → add only the deterministic `train.subset_n` support described in §3.5; do not special-case VICReg or Barlow Twins in the training loop.
+- `main.py` / dataset helper code → add only (a) the deterministic `train.subset_n` support described in §3.5 and (b) the checkpoint-init call described in §3.7, invoked right after `get_model`. Do not special-case any method in the training loop.
 - `configs/` → add new YAML config files (additive; no edits to existing configs).
+- A new helper module (e.g. `models/checkpoint_init.py`) for §3.7 — additive, imported by `train_model`.
 
 **Config → args.** `arguments.build_args` loads a YAML, deep-merges `overrides`, and exposes it as nested `Namespace` objects (`args.model.name`, `args.train.base_lr`, …). `args.aug_kwargs` is `{name: model.name, image_size: dataset.image_size}` — so `get_aug` is keyed on `model.name`. This means **`model.name` must equal the `get_aug` key**; plan the names accordingly (`vicreg`, `barlow_twins`).
 
 **Notebook entry point.** Notebooks call `colab_utils.train_from_colab(config_file=..., overrides=..., ...)`, which builds args (forcing notebook-safe defaults: `num_workers=0`, `tensorboard=False`, no DataParallel) and calls `main.train_model`. `train_model` runs the epoch loop, calls `knn_monitor` every `knn_interval`, saves a checkpoint, and (unless `args.eval is False`) runs linear eval. **`train_from_colab` already supports any non-meta model** — VICReg/Barlow Twins need no new colab helper, only a config and a model. Confirm this rather than adding a new wrapper.
 
-**Optimizers.** `optimizers/get_optimizer` supports `sgd`, `lars`, `lars_simclr`, `larc`. LR is scaled `base_lr * batch_size / 256` in `build_optimizer_and_scheduler`. VICReg/Barlow Twins canonically use LARS; for small-N CIFAR runs SGD or LARS are both acceptable — make it a config choice, default to what the existing baselines use for parity.
+**Optimizers.** `optimizers/get_optimizer` supports `sgd`, `lars`, `lars_simclr`, `larc`. LR is scaled `base_lr * batch_size / 256` in `build_optimizer_and_scheduler`. **Decision: the whole baseline suite uses LARS** — one shared optimizer and LR schedule across VICReg, Barlow Twins, SimCLR, and SimSiam — so the optimizer is held constant and any spectral/KNN difference is attributable to the method, not the optimizer. Keep `base_lr`/`warmup_epochs`/`final_lr`/weight-decay identical across the four configs. Note the small-N regime forces small batches (`batch_size <= subset_n`), so at the smallest N LARS runs outside its large-batch comfort zone; that is accepted in exchange for cross-method parity.
 
 ---
 
@@ -57,7 +59,7 @@ VICReg loss over two projected batches `z_a, z_b` of shape `[N, D]`:
 - **Covariance** `c(z) = sum_{i != j} Cov(z)_{ij}^2 / D`, where `Cov(z) = (z - z.mean(0)).T @ (z - z.mean(0)) / (N - 1)`. Apply to both.
 - **Total** `loss = sim_coeff * s + std_coeff * var_loss + cov_coeff * (c(z_a) + c(z_b))`, default coefficients `sim_coeff = 25.0`, `std_coeff = 25.0`, `cov_coeff = 1.0`.
 
-Return `{"loss": total, "inv_loss": s, "var_loss": ..., "cov_loss": ...}` so each term is logged. Make coefficients, expander dim, `eps`, and `gamma` constructor arguments read from `model_cfg` in `get_model` (use `getattr` with defaults, matching the `pseudo_supervised_net` pattern). Confirm the exact coefficient values and the variance/covariance formulas against the original paper (Bardes et al., 2022) before finalizing.
+Return `{"loss": total, "inv_loss": s, "var_loss": ..., "cov_loss": ...}` so each term is logged. Make coefficients, expander dim, `eps`, and `gamma` constructor arguments read from `model_cfg` in `get_model` (use `getattr` with defaults, matching the `pseudo_supervised_net` pattern). **Locked defaults = the original-paper values (Bardes et al., 2022): `sim_coeff = 25.0`, `std_coeff = 25.0`, `cov_coeff = 1.0`, `gamma = 1.0`, `eps = 1e-4`.** The expander dimension is the one deliberate departure from the paper: use **2048** (a CIFAR-scale choice; the paper's 8192 is unnecessary and slow here) and note this in the config comment.
 
 ### 3.2 `models/barlow_twins.py`
 
@@ -67,7 +69,7 @@ Projector + Barlow Twins loss over `z_a, z_b` of shape `[N, D]`:
 - **Loss** `= sum_i (1 - C_ii)^2 + lambd * sum_{i != j} C_ij^2`, default `lambd = 0.0051`. Do not name a Python parameter `lambda`; use `lambd` or `offdiag_coeff`.
 - Use a helper `off_diagonal(C)` to select off-diagonal elements.
 
-Return `{"loss": total, "on_diag": ..., "off_diag": ...}`. Projector: 3-layer BN-MLP, dim configurable (default 2048). `lambd` and projector dim come from `model_cfg`. Confirm against Zbontar et al., 2021.
+Return `{"loss": total, "on_diag": ..., "off_diag": ...}`. Projector: 3-layer BN-MLP, dim configurable, default **2048** (deliberate CIFAR-scale choice vs. the paper's 8192; note in config). `lambd` and projector dim come from `model_cfg`. **Locked default = the original-paper value (Zbontar et al., 2021): `lambd = 0.0051`.**
 
 ### 3.3 Augmentation registration
 
@@ -86,16 +88,19 @@ def effective_rank(F):            # exp(entropy of normalized singular value dis
 def knn_eval(F, labels, k=20, n_train=None):  # cosine-similarity KNN accuracy within the N samples
 
 def extract_features(backbone, loader, device, n_samples=1000):
-    # forward pass of the *penultimate* layer (model.backbone), L2-norm optional, returns (F, labels)
+    # forward pass of the *penultimate* layer (model.backbone); returns RAW features (no L2-norm) + labels
 ```
 
-`extract_features` must read features from `model.backbone` (the 512-d penultimate layer), not the projector, because idea.md defines the feature matrix `F` as the ResNet-18 penultimate output. Reuse `knn_monitor`'s feature-extraction approach (`tools/knn_monitor.py`) for consistency. Effective rank uses the natural-log entropy formula; document the convention in a docstring.
+`extract_features` must read features from `model.backbone` (the 512-d penultimate layer), not the projector, because idea.md defines the feature matrix `F` as the ResNet-18 penultimate output. Reuse `knn_monitor`'s extraction loop structure, but **return raw features — do NOT L2-normalize before returning.** Normalizing would distort the singular-value spectrum and corrupt the effective-rank measurement; `knn_eval` applies its own cosine normalization internally, and `knn_monitor`'s `F.normalize` step is specific to its own KNN and must not be copied into `extract_features`. Effective rank uses the natural-log entropy formula; document the convention in a docstring.
 
-**Determinism (non-negotiable — every method must be evaluated on the exact same images, in the same order).** The whole point of the Section 2.1 comparison is that pseudo_sup, SimCLR, SimSiam, VICReg, and Barlow Twins are scored on an *identical* feature-evaluation set, so any difference in effective rank or KNN is attributable to the method, not to sampling. `extract_features` must therefore guarantee a reproducible, method-independent feature matrix:
+**Determinism (non-negotiable — every method must be evaluated on the exact same images, in the same order).** The whole point of the Section 2.1 comparison is that pseudo_sup, SimCLR, SimSiam, VICReg, and Barlow Twins are scored on an *identical* feature-evaluation set, so any difference in effective rank or KNN is attributable to the method, not to sampling. `extract_features` **and the caller that builds its loader** must together guarantee a reproducible, method-independent feature matrix. The split of responsibility:
 
+`extract_features` itself owns:
 - **`backbone.eval()` + `torch.no_grad()`** before the forward pass. ResNet-18 uses BatchNorm; in train mode it normalizes with *batch* statistics, so a feature would depend on how samples are grouped into batches and would drift run-to-run. Eval mode uses fixed running stats, making each image's feature independent of its batch. This is exactly why `knn_monitor` calls `net.eval()`. Omitting it makes the numbers non-deterministic even with a fixed loader order.
-- **`shuffle=False`, `drop_last=False`** on the diagnostics loader. `knn_monitor`/`build_eval_loader` rely on `shuffle=False`: the feature bank is built by iterating in order while labels are read by dataset index, so shuffling silently misaligns features and labels and collapses KNN to chance. Beyond alignment, `shuffle=False` preserves the selected-index order so the shared N-pool is evaluated identically for every method. `drop_last=False` ensures all N rows are present.
-- **Collect labels from the loader iteration** (`for data, target in loader: feats.append(net(data)); labels.append(target)`) rather than from `dataset.targets`/`.labels`. Combined with `shuffle=False` this is belt-and-suspenders: features and labels are paired within the same batch, so alignment holds even if the dataset attribute order ever diverges.
+- **Collecting labels from the loader iteration** (`for data, target in loader: feats.append(net(data)); labels.append(target)`) rather than from `dataset.targets`/`.labels`. Combined with the caller's `shuffle=False` this is belt-and-suspenders: features and labels are paired within the same batch, so alignment holds even if the dataset attribute order ever diverges. Then truncate to `n_samples`.
+
+The caller (cell 6 / §3.5 item 2) owns loader construction, and `extract_features` may defensively assert the loader is non-shuffling:
+- **`shuffle=False`, `drop_last=False`** on the diagnostics loader, which is passed *into* `extract_features`. `knn_monitor`/`build_eval_loader` rely on `shuffle=False`: the feature bank is built by iterating in order while labels are read by dataset index, so shuffling silently misaligns features and labels and collapses KNN to chance. Beyond alignment, `shuffle=False` preserves the selected-index order so the shared N-pool is evaluated identically for every method. `drop_last=False` ensures all N rows are present.
 - **Deterministic eval transform.** Use `get_aug(train=False, train_classifier=False, ...)` → `Transform_single(train=False)`, which is `Resize → CenterCrop → ToTensor → Normalize` with no random crop/flip (the random ops live only in the `train=True` branch). Do not feed a training/two-view transform into the diagnostics loader.
 - **`num_workers=0`** (already the notebook default from `colab_utils`) keeps iteration order deterministic.
 
@@ -117,7 +122,7 @@ idea.md sweeps `N ∈ {200, 500, 1000, 5000, full}` for *both* the training set 
    For regular two-view methods, wrap the base dataset in a `Subset` built from those indices. Preserve label metadata in subset-local order. It is not enough to copy the full parent `.targets` onto a random `Subset`, because `knn_monitor` assumes feature-bank rows and labels have the same order and length. The wrapped subset should expose:
    - `.classes` copied from the parent dataset when available.
    - `.targets = [parent.targets[i] for i in indices]` for CIFAR-like datasets.
-   - `.labels = parent.labels[indices]` or an equivalent list for STL-10-style datasets.
+   - `.labels = parent.labels[indices]` for STL-10-style datasets (not exercised in this CIFAR-only branch, but keep the helper general).
 
    For `pseudo_supervised_net`, do **not** wrap and then let `PseudoSupervisedDataset` sample again via `source_pool_size`; that would double-sample and can break the same-data invariant. Instead pass the selected indices directly as `explicit_indices=indices` to `PseudoSupervisedDataset`, so its pseudo-labels are the positions within the same shared pool. If `explicit_indices` is used, `source_pool_size` is not required.
 
@@ -128,33 +133,66 @@ Implement (1) test-first; the subset must be deterministic given a seed so the N
 
 ### 3.6 Configs
 
-Add `configs/baselines/vicreg_cifar10.yaml` and `configs/baselines/barlow_twins_cifar10.yaml`, modeled on the structure of `configs/meta_exps/meta_random_config.yaml` but **without** the `meta:` section (these use the plain `train_model` path). Required sections: `name`, `dataset` (cifar10, image_size 32), `model` (name + backbone resnet18 + method hyperparams), `train` (optimizer, LR schedule, epochs, batch_size, `knn_monitor: false` by default unless you intentionally want the separate repo train/test smoke monitor, `subset_n: null`, `subset_seed: 42`), and `eval` (linear-eval block — or set `eval: false` if not needed for the go/no-go).
+Add four CIFAR-10 configs under `configs/baselines/`: `vicreg_cifar10.yaml`, `barlow_twins_cifar10.yaml`, `simclr_cifar10.yaml`, `simsiam_cifar10.yaml`. Model them on the structure of `configs/meta_exps/meta_random_config.yaml` but **without** the `meta:` section (these use the plain `train_model` path). Required sections: `name`, `dataset` (cifar10, image_size 32), `model` (name + backbone resnet18 + method hyperparams), `train`, and `eval`.
 
-There are no SimCLR/SimSiam baseline YAMLs in this checkout, so do not say "mirror existing baseline configs" unless you add those configs in the same branch. For an initial fair comparison, use explicit shared defaults across VICReg and Barlow Twins, for example the repo's current pseudo-supervised optimizer schedule (`sgd`, weight decay `0.0005`, momentum `0.9`, `base_lr: 0.03`, `warmup_epochs: 5`) unless you decide to create a full LARS-based baseline suite for all compared SSL methods. Only the `model` block and method-specific knobs should differ between the two new baseline configs.
+**Shared across all four (for parity):**
+- `train.optimizer`: **LARS**, with one identical LR schedule (`base_lr`, `warmup_epochs`, `final_lr`, weight decay) reused verbatim across the four files — this is the LARS baseline suite decided in §2. Assert the equality in tests.
+- `train.knn_monitor: false` by default (the in-training monitor uses the full train/test loaders, not the Section 2.1 within-N split — keep it off to save compute; if ever enabled, treat its number only as `monitor_accuracy`).
+- `train.subset_n: null`, `train.subset_seed: 42`.
+- `eval: false` — **linear-eval monitoring is OFF during all training runs** (decided). Linear eval, if wanted, is a separate post-training step (see §4) run on saved checkpoints after the go/no-go.
 
-Provide both CIFAR-10 and (optionally) an STL-10 variant since idea.md uses both.
+**Differs per file:** only the `model` block. VICReg and Barlow Twins carry their locked paper coefficients and the **2048** projector/expander dim. SimCLR and SimSiam reference the existing models unchanged — do **not** alter their projector architectures (SimCLR's is 256-d, SimSiam's 2048-d by construction); just set `model.name` to `simclr`/`simsiam` and attach the shared `train`/`eval` blocks.
+
+**Fifth config — `pseudo_sup_cifar10.yaml` (single-episode reproduction, NOT in the LARS block).** `model.name: pseudo_supervised_net`, backbone resnet18, reproducing one episode of `notebooks/random-meta-cifar10-ssl.ipynb`: carry the same single-episode settings the meta path uses (`model.cosine_softmax: true`, `model.l2_norm_backbone_features: true`, `train.negatives_ratio`, `train.augment_probability: 1.0`, the SGD schedule from `meta_random_config.yaml` — `sgd`, weight decay `0.0005`, momentum `0.9`, `base_lr: 0.03`, `warmup_epochs: 5`). Use the plain `train_model` path (not `meta_train_model`) with `subset_n`/`subset_seed` + the `explicit_indices` wiring from §3.5 so it trains on the exact shared N-pool. This is the one deliberate optimizer asymmetry: `pseudo_sup` keeps its native SGD recipe because its thesis is that it needs no large-batch/LARS machinery — forcing LARS on it would be unfaithful. Same `eval: false`, `knn_monitor: false`, `subset_seed: 42` as the rest. Document the asymmetry in a config comment.
+
+Every config also exposes the checkpoint-init keys from §3.7 (default `init_checkpoint: null`).
+
+CIFAR-10 only; no STL-10 in this branch.
+
+### 3.7 Checkpoint initialization (all methods)
+
+Every training run can optionally start from a saved checkpoint instead of random init. This is required for idea.md's proposed method — **SimCLR warm-started from `pseudo_sup` weights** — and is also useful for resuming/continuing any method.
+
+**Config keys** (under `model`, consumed in `train_model` right after `get_model`, default to a no-op):
+- `init_checkpoint: null` — path to a `.pth` saved by `save_checkpoint` (`{"epoch", "state_dict"}`). `null` = random init.
+- `init_load_backbone: true` — **load the backbone by default.**
+- `init_load_projector: false` — optionally load the projector.
+- `init_load_predictor: false` — optionally load the predictor.
+
+**Helper** `load_init_weights(model, checkpoint_path, load_backbone=True, load_projector=False, load_predictor=False)` in the new `models/checkpoint_init.py`:
+- `state_dict = torch.load(checkpoint_path, map_location="cpu")["state_dict"]` (flat module state dict with `backbone.` / projector / predictor / `classifier.` prefixes).
+- Load each requested submodule **by prefix into the target submodule**, resolving the attribute name per architecture: backbone is always `backbone`; the projector is `projector` for SimCLR/SimSiam/VICReg/Barlow Twins and `proj` for `pseudo_supervised_net`; the predictor is `predictor` for SimSiam and `pred` for `pseudo_supervised_net` (SimCLR/VICReg/Barlow Twins have none). Use `getattr` with this mapping; reuse the `backbone.`-prefix extraction style from `linear_eval.load_backbone_weights`.
+- **Backbone is the cross-architecture case** (all methods share the same castrated resnet18, so `backbone.` keys always match) — this is the primary use. Projector/predictor transfer only makes sense between architectures whose submodule shapes match (e.g. same method, or same projector dims); if a requested submodule is missing on the target or its shapes mismatch, **raise a clear error** rather than silently skipping (a requested-but-unloadable init is almost always a mistake). When `load_*` is `False`, that submodule is simply left at its random init.
+- Log exactly which submodules were loaded from which checkpoint for provenance.
+
+Keep it additive: `train_model` calls `load_init_weights(...)` only when `model.init_checkpoint` is set; otherwise behaviour is unchanged.
 
 ---
 
 ## 4. Notebooks (the primary deliverable)
 
-Create one notebook per method, named to match the reference convention:
+Create one notebook per method, named to match the reference convention — five in the suite:
+- `notebooks/pseudo-sup-cifar10-ssl.ipynb`
 - `notebooks/vicreg-cifar10-ssl.ipynb`
 - `notebooks/barlow-twins-cifar10-ssl.ipynb`
+- `notebooks/simclr-cifar10-ssl.ipynb`
+- `notebooks/simsiam-cifar10-ssl.ipynb`
 
-Each must reuse the setup/training cell structure of `notebooks/random-meta-cifar10-ssl.ipynb`, changing only the training-call and the parameter markdown, then add one diagnostics cell:
+The SimCLR/SimSiam notebooks are structural clones of the VICReg/Barlow Twins ones — only the `config_file` and the method-hyperparameter markdown differ (no new model code, since those models already exist). The **`pseudo_sup` notebook reproduces a single episode** of `notebooks/random-meta-cifar10-ssl.ipynb`: same cell structure and the same per-episode hyperparameters (negatives_ratio, cosine_softmax, l2_norm, SGD recipe), but it calls `train_from_colab` with `configs/baselines/pseudo_sup_cifar10.yaml` (the plain `train_model` path on the shared N-pool) rather than `meta_train_from_colab` — so it behaves like one episode while staying on the suite's shared-N-pool + diagnostics machinery. Each notebook reuses the setup/training cell structure of the reference, changing only the training-call and the parameter markdown, then adds one diagnostics cell:
 
 1. **Cell 0 (markdown):** title + short description of the method and what the notebook produces (trained backbone + spectral/KNN diagnostics across the N-sweep).
 2. **Cell 1 (code):** Google Drive mount (`try: from google.colab import drive ... except ModuleNotFoundError`). Copy verbatim from the reference.
 3. **Cell 2 (code):** repo clone/sync with optional `GITHUB_TOKEN`, `pip install -r` requirements. Copy verbatim, keeping `PUBLIC_REPO_URL` and the `BRANCH` handling — set `BRANCH` so the notebook pulls this baselines branch (or `main` after merge; make the intent explicit in a comment).
 4. **Cell 3 (code):** CIFAR-10 download into the Drive data dir. Copy verbatim.
-5. **Cell 4 (markdown):** parameter table documenting the override keys this notebook exposes (method hyperparameters, `subset_n`, batch size, epochs, knn settings) — same table style as the reference.
-6. **Cell 5 (code):** the training call. Use `from colab_utils import train_from_colab` and pass `config_file='configs/baselines/<method>_cifar10.yaml'` with an `overrides` dict, following the exact override-dict shape used in the reference's `meta_train_from_colab` call (top-level `name`, nested `train`, `model` blocks). Expose the N-sweep as a Python list the user can edit; loop over N, calling `train_from_colab` per N and collecting `model_path`, `log_dir`, the selected subset indices/path, and (if `train.knn_monitor=True`) `monitor_accuracy`. Do not label the returned `train_from_colab()["accuracy"]` as the Section 2.1 KNN metric: that built-in monitor uses the repo's train/test eval loaders, while Section 2.1 requires the 80/20 split inside the shared N-pool. Prefer setting `train.knn_monitor: False` in these baseline configs to save compute, or keep it only as a smoke-monitor field named `monitor_accuracy`. For each N, override `train.subset_n`, `train.subset_seed`, and a valid `train.batch_size <= subset_n` so `drop_last=True` cannot produce an empty training loader.
+5. **Cell 4 (markdown):** parameter table documenting the override keys this notebook exposes (method hyperparameters, `subset_n`, batch size, epochs, knn settings, **and the §3.7 checkpoint-init keys**) — same table style as the reference.
+6. **Cell 5 (code):** the training call. Use `from colab_utils import train_from_colab` and pass `config_file='configs/baselines/<method>_cifar10.yaml'` with an `overrides` dict, following the exact override-dict shape used in the reference's `meta_train_from_colab` call (top-level `name`, nested `train`, `model` blocks). **Expose the checkpoint-init options** as editable notebook variables (`INIT_CHECKPOINT = None`, `INIT_LOAD_BACKBONE = True`, `INIT_LOAD_PROJECTOR = False`, `INIT_LOAD_PREDICTOR = False`) mapped into `overrides['model']` (`init_checkpoint`, `init_load_backbone`, `init_load_projector`, `init_load_predictor`) — so any run can warm-start from a saved checkpoint (e.g. point the SimCLR notebook at a `pseudo_sup` checkpoint to build idea.md's proposed method). Default `INIT_CHECKPOINT = None` (random init). Expose the N-sweep as a Python list the user can edit; loop over N, calling `train_from_colab` per N and collecting `model_path`, `log_dir`, the selected subset indices/path, and (if `train.knn_monitor=True`) `monitor_accuracy`. Do not label the returned `train_from_colab()["accuracy"]` as the Section 2.1 KNN metric: that built-in monitor uses the repo's train/test eval loaders, while Section 2.1 requires the 80/20 split inside the shared N-pool. Prefer setting `train.knn_monitor: False` in these baseline configs to save compute, or keep it only as a smoke-monitor field named `monitor_accuracy`. For each N, override `train.subset_n`, `train.subset_seed`, and a valid `train.batch_size <= subset_n` so `drop_last=True` cannot produce an empty training loader.
 7. **Cell 6 (code, new):** post-training diagnostics — load each checkpoint's backbone, call `analysis.spectral.extract_features` + `spectral_diagnostics` + `knn_eval`, and assemble the Section 2.1 comparison table (effective rank and KNN acc per N) plus a top-20 singular-value plot. Keep this cell importable-function-driven so it is unit-testable. For checkpoint loading, instantiate `get_backbone(args.model.backbone)`, call `linear_eval.load_backbone_weights(backbone, checkpoint_path)`, and pass that backbone to `extract_features`; do not instantiate the full SSL model for diagnostics. Build the diagnostics dataset/loader from the same selected indices used for that N's training run, then run extraction following the determinism rules in §3.4 (`backbone.eval()` + `torch.no_grad()`, `shuffle=False`, `drop_last=False`, labels from the loader, deterministic single-view eval transform, `num_workers=0`). Reuse the same selected-index list and loader order for every method's checkpoint so the feature matrices are computed over an identical image set. For each N, call `knn_eval(..., n_train=int(0.8 * N), k=min(20, int(0.8 * N)))`.
+
+**Linear eval is post-training only.** All five configs set `eval: false`, so no linear probe runs during the go/no-go sweep (the gate needs only effective rank + KNN — recall `train_model` skips inline eval exactly when `args.eval is False`). If you want linear-probe accuracy as a secondary metric, add an optional final cell that runs *after* the sweep — load each saved checkpoint and call `colab_utils.linear_eval_from_colab(...)`. **Important:** `linear_eval.main` reads `args.eval.batch_size`, `args.eval.optimizer`, `args.eval.base_lr`, etc., so a config with `eval: false` has no eval block to read and would raise. The post-hoc cell must therefore pass an `eval` block via `overrides={'eval': { ... }}` (optimizer, base_lr, warmup_epochs, num_epochs, batch_size) to repopulate `args.eval` for that standalone run. Never inline it during training.
 
 Constraints carried over from the reference: every code cell must be valid Python parseable by `ast.parse` (there is an existing test enforcing this — see §5), notebook-safe defaults come from `colab_utils` so do not re-set `num_workers`, and the notebook must run top-to-bottom on a fresh Colab runtime.
 
-Optionally add a third notebook `notebooks/baselines-spectral-comparison-cifar10.ipynb` that loads checkpoints from all methods (pseudo_sup, SimCLR, SimSiam, VICReg, Barlow Twins) and renders the full idea.md Section 2.1 table and the multi-method singular-value figure. Decide based on effort; the per-method notebooks are the required minimum.
+Optionally add a sixth, comparison notebook `notebooks/baselines-spectral-comparison-cifar10.ipynb` that loads checkpoints from all methods (pseudo_sup, SimCLR, SimSiam, VICReg, Barlow Twins) and renders the full idea.md Section 2.1 table and the multi-method singular-value figure. Decide based on effort; the per-method notebooks are the required minimum.
 
 ---
 
@@ -180,7 +218,7 @@ Write tests **before** the corresponding implementation. Place them in `tests/`,
 - `spectral_diagnostics` returns singular values in descending order and `explained_variance` monotonically increasing to 1.0.
 - `knn_eval` returns 1.0 on a trivially separable toy set (two well-separated clusters), uses an 80/20 split by default when `n_train=None`, and clamps `k` so small-N cases such as N=200 are valid. Avoid assertions on random-label chance accuracy; those are inherently flaky.
 - `extract_features` returns `F` of shape `[n_samples, backbone.output_dim]` and matching label length, reading from `backbone` (assert width == 512 for resnet18).
-- **Determinism / same-data guarantees:** calling `extract_features` twice on the same backbone + loader returns identical `F` and identical `labels` (byte-for-byte), and two *different* backbones run over the same loader return the same `labels` and the same image ordering. Include a regression test that puts the backbone in `.train()` mode with a BatchNorm layer and asserts `extract_features` still returns deterministic features (proving it forces `.eval()` internally). Assert the diagnostics loader is constructed with `shuffle=False`, `drop_last=False`, and the exact selected indices from the corresponding training N-pool.
+- **Determinism / same-data guarantees:** calling `extract_features` twice on the same backbone + loader returns identical `F` and identical `labels` (byte-for-byte), and two *different* backbones run over the same loader return the same `labels` and the same image ordering. Include a regression test that puts the backbone in `.train()` mode with a BatchNorm layer and asserts `extract_features` still returns deterministic features (proving it forces `.eval()` internally) and returns **raw, un-normalized** features (e.g. feature norms are not all ≈ 1). Separately, test the diagnostics loader *builder* (caller side): it produces a loader with `shuffle=False`, `drop_last=False`, over the exact selected indices from the corresponding training N-pool; and `extract_features` raises (or its defensive assert fires) if handed a shuffling loader.
 
 **`tests/test_subset_n.py`**
 - `subset_n` produces a dataset of exactly N items; same seed → identical indices; different seed → different indices; `.classes` is preserved and `.targets` / `.labels` are subset-local and length N so `knn_monitor` still works.
@@ -188,14 +226,24 @@ Write tests **before** the corresponding implementation. Place them in `tests/`,
 - `pseudo_supervised_net` receives the selected N-pool through `PseudoSupervisedDataset(explicit_indices=indices)` rather than through a second `source_pool_size` sample. Assert its `source_indices` exactly equal the shared selected indices and `num_pseudo_classes == subset_n`.
 - `build_train_loader` with `subset_n=200` and a notebook-style batch-size override produces at least one batch; if `batch_size > subset_n` with `drop_last=True`, the code should either raise a clear error or the notebook should avoid that configuration.
 
+**`tests/test_checkpoint_init.py`**
+- `load_init_weights` with `load_backbone=True` (default) loads only backbone weights and leaves projector/predictor at random init; assert backbone params equal the checkpoint's and a projector param does not.
+- **Cross-architecture backbone transfer:** save a `pseudo_supervised_net` checkpoint, load its backbone into a freshly built `SimCLR` model; assert every `backbone.*` param matches and the load succeeds (this is the proposed-method path).
+- `load_projector=True` / `load_predictor=True` load the correct submodule for each architecture (resolve `projector`/`proj`, `predictor`/`pred`); SimSiam round-trips predictor, `pseudo_supervised_net` round-trips `pred`.
+- Requesting a submodule the target lacks (e.g. `load_predictor=True` into SimCLR) or a shape-mismatched projector **raises a clear error**, not a silent skip.
+- `init_checkpoint: null` is a no-op: `train_model` builds the model identically to the no-init path.
+
 **`tests/test_baseline_configs.py`**
-- Both new YAMLs load, declare the expected `model.name` (`vicreg` / `barlow_twins`), `backbone: resnet18`, and a `subset_n` key; coefficients present and of correct type.
-- Baseline configs set `train.knn_monitor: false` by default, or tests/documentation must prove the returned monitor accuracy is named separately from the Section 2.1 within-N KNN metric.
+- All five YAMLs (`pseudo_sup`, `vicreg`, `barlow_twins`, `simclr`, `simsiam`) load and declare the expected `model.name`, `backbone: resnet18`, `train.subset_n`/`train.subset_seed`, `eval: false`, and the `model.init_checkpoint` (default null) + `init_load_*` keys.
+- The four LARS configs (`vicreg`, `barlow_twins`, `simclr`, `simsiam`) declare `train.optimizer` name `lars` and share an identical `train` optimizer/LR block — assert equality across the four so the LARS schedule is held constant for parity. The `pseudo_sup` config is intentionally excluded (it uses the SGD single-episode recipe) — assert it declares `sgd` and carries `cosine_softmax`/`l2_norm_backbone_features`.
+- VICReg/Barlow Twins configs carry the locked paper coefficients (`sim/std/cov = 25/25/1`, `lambd = 0.0051`) and projector dim `2048`, of correct type.
+- `train.knn_monitor: false` in all five (or tests/documentation prove the monitor number is named separately from the Section 2.1 within-N KNN metric).
 - `get_model` builds each method from its config and `get_aug` resolves each `model.name` without raising.
 
 **`tests/test_baseline_notebooks.py`** (mirror `test_negatives_ratio.py`'s notebook test)
-- Each new notebook's code cells all pass `ast.parse`.
-- Required strings present: `from colab_utils import train_from_colab`, the correct `config_file=...` path, the N-sweep list variable, `subset_n`, `subset_seed`, selected-index reuse in diagnostics, `monitor_accuracy` (or `knn_monitor: False`), and a per-N batch-size rule.
+- Each of the five notebooks' code cells all pass `ast.parse`.
+- Required strings present in each: `from colab_utils import train_from_colab`, the correct `config_file=...` path, the N-sweep list variable, `subset_n`, `subset_seed`, the checkpoint-init variables (`INIT_CHECKPOINT`, `INIT_LOAD_BACKBONE`, `INIT_LOAD_PROJECTOR`, `INIT_LOAD_PREDICTOR`), selected-index reuse in diagnostics, `monitor_accuracy` (or `knn_monitor: False`), and a per-N batch-size rule.
+- The `pseudo_sup` notebook references `pseudo_sup_cifar10.yaml` and carries the single-episode settings (`cosine_softmax`, `l2_norm_backbone_features`, `negatives_ratio`).
 
 Keep tests CPU-only and tiny (small batches, 1–2 channels/dims where possible, `resnet18` only where a real backbone is needed) so they run fast without a GPU. Avoid network/dataset downloads in tests — use synthetic tensors and `TinyDataset`-style stubs as in the existing test file.
 
@@ -205,11 +253,12 @@ Keep tests CPU-only and tiny (small batches, 1–2 channels/dims where possible,
 
 1. `analysis/spectral.py` + `tests/test_spectral_diagnostics.py` (no dependencies; foundational).
 2. Subset-N support in `main.build_train_loader`/dataset helpers, including selected-index persistence and the `pseudo_supervised_net` `explicit_indices` path + `tests/test_subset_n.py`.
-3. `models/vicreg.py` + `tests/test_vicreg.py`; register in `models/__init__.py` and `augmentations/__init__.py`.
-4. `models/barlow_twins.py` + `tests/test_barlow_twins.py`; register likewise.
-5. Configs + `tests/test_baseline_configs.py`.
-6. Notebooks + `tests/test_baseline_notebooks.py`.
-7. Smoke run: one tiny end-to-end run per method (`debug=True` or 1 epoch, N=200) on CPU/Colab to confirm `train_from_colab` → `train_model` → checkpoint save → shared-index diagnostics works end-to-end. If `train.knn_monitor` is enabled for smoke monitoring, keep its output separate from the Section 2.1 KNN metric.
+3. `models/checkpoint_init.py` (`load_init_weights`) + the `train_model` init hook + `tests/test_checkpoint_init.py`.
+4. `models/vicreg.py` + `tests/test_vicreg.py`; register in `models/__init__.py` and `augmentations/__init__.py`.
+5. `models/barlow_twins.py` + `tests/test_barlow_twins.py`; register likewise.
+6. Configs for all five methods (four-method LARS suite + `pseudo_sup` SGD single-episode config, all `eval: false`, all exposing the init keys) + `tests/test_baseline_configs.py`.
+7. Notebooks for all five methods (SimCLR/SimSiam are config-only clones of the VICReg/Barlow Twins notebooks; `pseudo_sup` reproduces one meta episode) + `tests/test_baseline_notebooks.py`.
+8. Smoke run: one tiny end-to-end run per method (`debug=True` or 1 epoch, N=200) on CPU/Colab to confirm `train_from_colab` → `train_model` → checkpoint save → shared-index diagnostics works end-to-end, plus one run that warm-starts a SimCLR model from a `pseudo_sup` checkpoint via `init_checkpoint`. If `train.knn_monitor` is enabled for smoke monitoring, keep its output separate from the Section 2.1 KNN metric.
 
 At each step run `pytest` and keep the suite green before moving on.
 
@@ -218,16 +267,21 @@ At each step run `pytest` and keep the suite green before moving on.
 ## 7. Acceptance criteria
 
 - `pytest tests/` passes, including all new tests, with no regressions to `test_negatives_ratio.py`.
-- `get_model` and `get_aug` resolve `vicreg` and `barlow_twins`; a 1-epoch `train_from_colab` run completes for each and produces a checkpoint. If the repo train/test KNN monitor is enabled, its number is logged only as `monitor_accuracy`, not as the Section 2.1 within-N KNN metric.
-- Each new notebook runs top-to-bottom on a fresh Colab runtime and emits the Section 2.1 metrics (effective rank, KNN acc, top-20 singular values) for at least N ∈ {200, 1000, full}.
+- `get_model` and `get_aug` resolve `vicreg` and `barlow_twins`; all five baseline configs (`pseudo_sup`, VICReg, Barlow Twins, SimCLR, SimSiam) drive a 1-epoch `train_from_colab` run to a saved checkpoint with `eval: false` — the four contrastive/decorrelation methods under the shared LARS schedule, `pseudo_sup` under its SGD single-episode recipe. If the repo train/test KNN monitor is enabled, its number is logged only as `monitor_accuracy`, not as the Section 2.1 within-N KNN metric.
+- **Checkpoint init works:** with `init_checkpoint` set, a run loads the backbone by default and optionally projector/predictor; a SimCLR model successfully warm-starts its backbone from a `pseudo_sup` checkpoint (the proposed-method path), and an unloadable requested submodule errors clearly.
+- Each of the five notebooks runs top-to-bottom on a fresh Colab runtime and emits the Section 2.1 metrics (effective rank, KNN acc, top-20 singular values) for at least N ∈ {200, 1000, full}.
 - The diagnostics module reproduces the `idea.md` reference formulas (verify effective rank and KNN against a hand-checked toy example).
 - **Same-data invariant holds end to end:** at each N, every method trains on the identical `(subset_n, subset_seed)` subset and is evaluated by `extract_features` over the identical, deterministically ordered image set (`backbone.eval()`, `shuffle=False`). Re-running diagnostics on a checkpoint reproduces its effective rank and KNN exactly.
-- No edits to `arguments.py`, the core epoch loop, or existing model implementations. Existing-file changes are limited to model/augmentation registration plus the tested subset helper path required for the N-sweep.
+- No edits to `arguments.py`, the core epoch loop, or existing model implementations. Existing-file changes are limited to model/augmentation registration, the tested subset helper path, and the tested checkpoint-init call in `train_model`.
 
-## 8. Open questions to confirm before/early in implementation
+## 8. Resolved decisions (binding)
 
-- **Optimizer for parity:** there are no SimCLR/SimSiam baseline YAMLs in this checkout. Either use the explicit shared SGD defaults in §3.6 for VICReg/Barlow Twins and later add matching SimCLR/SimSiam configs, or build a full LARS-based baseline suite for all compared SSL methods. Decide and document the choice in the configs.
-- **Projector/expander dimension** at CIFAR scale (suggested 2048; the papers' 8192 is likely unnecessary and slow) — pick and justify in config comments.
-- **Linear eval on/off** for the go/no-go: the gate only needs effective rank + KNN, so `eval` can be disabled to save compute; confirm before committing config defaults.
-- **STL-10 variant:** idea.md uses CIFAR-10 *and* STL-10; build CIFAR-10 first, add STL-10 configs/notebooks if in scope for this branch.
-- **Reference hyperparameters:** confirm VICReg coefficients (25/25/1, with the two variance terms averaged) and Barlow Twins `lambd` (0.0051) against the original papers before locking defaults.
+These were open questions; the project owner has decided each. Treat as binding.
+
+- **Optimizer / baseline suite:** build a single **LARS-based** baseline suite covering the four contrastive/decorrelation methods — VICReg, Barlow Twins, SimCLR, and SimSiam — with one shared LR schedule, and ship a Colab notebook for each. SimCLR/SimSiam reuse their existing models (config + notebook only, no model edits). (§2, §3.6, §4)
+- **`pseudo_sup` in the suite:** add a fifth notebook/config that reproduces **one episode** of `notebooks/random-meta-cifar10-ssl.ipynb` via the plain `train_model` path on the shared N-pool. It deliberately keeps its **native SGD pseudo-supervised recipe (not LARS)** — that optimizer asymmetry is intentional and documented. (§3.6, §4)
+- **Checkpoint initialization (all methods):** every notebook/config can warm-start from a saved checkpoint, loading the **backbone by default** and **optionally the projector and predictor** (§3.7). This enables idea.md's "SimCLR + pseudo_sup init" proposed method. Requested-but-unloadable submodules error rather than silently skip. (§2, §3.7, §4)
+- **Projector/expander dimension:** **2048** for the new VICReg/Barlow Twins models. SimCLR/SimSiam keep their existing architecture dims unchanged. (§3.1, §3.2, §3.6)
+- **Linear eval:** **off for all training runs** (`eval: false`) to save compute; run linear eval only as a separate post-training step on saved checkpoints. (§3.6, §4)
+- **STL-10:** **out of scope** for this branch (deferred to other work). CIFAR-10 only. (§1, §3.6)
+- **Reference hyperparameters:** use the **original-paper values** as defaults — VICReg `25/25/1` (two variance terms averaged, `gamma=1`, `eps=1e-4`), Barlow Twins `lambd = 0.0051`. The 2048 projector dim is the only intentional departure (a CIFAR-scale choice). (§3.1, §3.2)
