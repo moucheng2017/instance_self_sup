@@ -1,0 +1,51 @@
+name: pseudo-sup-cifar10-baseline
+seed: 42
+
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  name: pseudo_supervised_net
+  backbone: resnet18
+  # Single-episode native pseudo-supervised recipe, intentionally SGD rather
+  # than the LARS block used by the other four baselines.
+  cosine_softmax: true
+  cosine_scale: 16.0
+  l2_norm_backbone_features: true
+  init_checkpoint: null
+  init_load_backbone: true
+  init_load_projector: false
+  init_load_predictor: false
+
+train:
+  optimizer:
+    name: sgd
+    weight_decay: 0.0005
+    momentum: 0.9
+  warmup_epochs: 5
+  warmup_lr: 0
+  base_lr: 0.03
+  final_lr: 0
+  num_epochs: 100
+  stop_at_epoch: 100
+  batch_size: 128
+  source_pool_size: 50000
+  subset_n: null
+  subset_seed: 42
+  negatives_ratio: 0.25
+  augment_probability: 1.0
+  samples_per_epoch: null
+  knn_monitor: false
+  knn_interval: 1
+  knn_k: 20
+  use_data_parallel: false
+  optimizer_separate: false
+  saving_frequency: null
+
+eval: false
+
+logger:
+  tensorboard: false
+  matplotlib: true

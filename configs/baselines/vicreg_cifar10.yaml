@@ -1,0 +1,48 @@
+name: vicreg-cifar10-baseline
+seed: 42
+
+dataset:
+  name: cifar10
+  image_size: 32
+  num_workers: 0
+
+model:
+  name: vicreg
+  backbone: resnet18
+  # CIFAR-scale projector; original VICReg used 8192 on larger images.
+  expander_dim: 2048
+  sim_coeff: 25.0
+  std_coeff: 25.0
+  cov_coeff: 1.0
+  gamma: 1.0
+  eps: 0.0001
+  init_checkpoint: null
+  init_load_backbone: true
+  init_load_projector: false
+  init_load_predictor: false
+
+train:
+  optimizer:
+    name: lars
+    weight_decay: 0.000001
+    momentum: 0.9
+  warmup_epochs: 10
+  warmup_lr: 0
+  base_lr: 0.3
+  final_lr: 0
+  num_epochs: 100
+  stop_at_epoch: 100
+  batch_size: 256
+  subset_n: null
+  subset_seed: 42
+  knn_monitor: false
+  knn_interval: 1
+  knn_k: 20
+  use_data_parallel: false
+  saving_frequency: null
+
+eval: false
+
+logger:
+  tensorboard: false
+  matplotlib: true

@@ -12,9 +12,11 @@ def get_aug(name='simsiam', image_size=224, train=True, train_classifier=None):
             augmentation = SimSiamTransform(image_size)
         elif name == 'byol':
             augmentation = BYOL_transform(image_size)
-        elif name == 'simclr':
+        elif name in ('simclr', 'vicreg', 'barlow_twins'):
             augmentation = SimCLRTransform(image_size)
         elif name == 'strong':
+            augmentation = StrongTransform(image_size)
+        elif name == 'pseudo_supervised_net':
             augmentation = StrongTransform(image_size)
         elif name == 'weak':
             augmentation = WeakTransform()
@@ -28,8 +30,6 @@ def get_aug(name='simsiam', image_size=224, train=True, train_classifier=None):
         raise Exception
     
     return augmentation
-
-
 
 
 

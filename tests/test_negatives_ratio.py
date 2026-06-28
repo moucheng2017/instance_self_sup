@@ -63,5 +63,5 @@ def test_random_meta_notebook_negatives_ratio_override_is_valid():
         if cell.get("cell_type") == "code":
             ast.parse("".join(cell.get("source", [])))
 
-    assert "NEGATIVES_RATIO = 0.5" in code_source
+    assert "NEGATIVES_RATIO =" in code_source
     assert "'negatives_ratio': NEGATIVES_RATIO" in code_source

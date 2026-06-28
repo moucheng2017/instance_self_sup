@@ -10,7 +10,9 @@ from arguments import get_args, save_effective_config
 from augmentations import get_aug
 from datasets import get_dataset
 from datasets.pseudo_supervised import PseudoSupervisedDataset
+from datasets.subset import maybe_select_subset, save_subset_indices, select_subset_indices
 from linear_eval import main as linear_eval
+from models.checkpoint_init import load_init_weights
 from models import get_model
 from optimizers import LR_Scheduler, get_optimizer
 from tools import Logger, knn_monitor
@@ -53,7 +55,37 @@ def _get_num_workers(args):
     return args.dataloader_kwargs.get("num_workers", 0)
 
 
+def _subset_cfg(args):
+    subset_n = getattr(args.train, "subset_n", None)
+    subset_seed = getattr(args.train, "subset_seed", 42)
+    return subset_n, subset_seed
+
+
+def _save_selected_indices(args, indices):
+    path = save_subset_indices(indices, getattr(args, "log_dir", None))
+    vars(args)["selected_subset_indices"] = indices
+    vars(args)["selected_subset_indices_path"] = path
+    if path:
+        print(f"Saved subset indices to {path}")
+    return path
+
+
+def _selected_indices_path_after_finalize(path, completed_log_dir):
+    if path is None:
+        return None
+    return os.path.join(completed_log_dir, os.path.basename(path))
+
+
+def _check_nonempty_train_loader(dataset, args):
+    if args.dataloader_kwargs.get("drop_last", False) and args.train.batch_size > len(dataset):
+        raise ValueError(
+            "Training loader would be empty because batch_size is greater than the "
+            f"dataset length ({args.train.batch_size} > {len(dataset)}) with drop_last=True."
+        )
+
+
 def build_train_loader(args):
+    subset_n, subset_seed = _subset_cfg(args)
 
     if args.model.name in ("superimpose_net", "pseudo_supervised_net"):
         base_dataset = get_dataset(
@@ -61,6 +93,7 @@ def build_train_loader(args):
             train=True,
             **args.dataset_kwargs,
         )
+        selected_indices = select_subset_indices(len(base_dataset), subset_n, subset_seed)
         if args.model.name == "superimpose_net":
             if SuperimposeSourcesDataset is None:
                 raise ImportError("datasets.superimpose is required for model.name='superimpose_net'.")
@@ -76,13 +109,16 @@ def build_train_loader(args):
             dataset = PseudoSupervisedDataset(
                 dataset=base_dataset,
                 image_size=args.dataset.image_size,
-                source_pool_size=getattr(args.train, "source_pool_size", None),
+                source_pool_size=None if selected_indices is not None else getattr(args.train, "source_pool_size", None),
                 augment_probability=getattr(args.train, "augment_probability", 1.0),
                 subset_seed=getattr(args.train, "source_subset_seed", 0),
                 samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
                 batch_size=args.train.batch_size,
                 negatives_ratio=getattr(args.train, "negatives_ratio", None),
+                explicit_indices=selected_indices,
             )
+        _save_selected_indices(args, selected_indices)
+        _check_nonempty_train_loader(dataset, args)
         return torch.utils.data.DataLoader(
             dataset=dataset,
             shuffle=False,
@@ -93,12 +129,16 @@ def build_train_loader(args):
             persistent_workers=args.dataloader_kwargs.get("persistent_workers", False),
         )
 
+    base_dataset = get_dataset(
+        transform=get_aug(train=True, **args.aug_kwargs),
+        train=True,
+        **args.dataset_kwargs,
+    )
+    dataset, selected_indices = maybe_select_subset(base_dataset, subset_n, subset_seed)
+    _save_selected_indices(args, selected_indices)
+    _check_nonempty_train_loader(dataset, args)
     return torch.utils.data.DataLoader(
-        dataset=get_dataset(
-            transform=get_aug(train=True, **args.aug_kwargs),
-            train=True,
-            **args.dataset_kwargs,
-        ),
+        dataset=dataset,
         shuffle=True,
         batch_size=args.train.batch_size,
         **args.dataloader_kwargs,
@@ -188,10 +228,17 @@ def train_model(args, device=None, finalize_logs=False):
     memory_loader = build_eval_loader(args, train=True)
     test_loader = build_eval_loader(args, train=False)
 
-    model = maybe_data_parallel(
-        get_model(args.model, num_classes=getattr(train_loader.dataset, "num_pseudo_classes", None)).to(device),
-        args,
-    )
+    raw_model = get_model(args.model, num_classes=getattr(train_loader.dataset, "num_pseudo_classes", None))
+    init_checkpoint = getattr(args.model, "init_checkpoint", None)
+    if init_checkpoint:
+        load_init_weights(
+            raw_model,
+            init_checkpoint,
+            load_backbone=getattr(args.model, "init_load_backbone", True),
+            load_projector=getattr(args.model, "init_load_projector", False),
+            load_predictor=getattr(args.model, "init_load_predictor", False),
+        )
+    model = maybe_data_parallel(raw_model.to(device), args)
     optimizer, lr_scheduler = build_optimizer_and_scheduler(model, train_loader, args)
     logger = Logger(
         tensorboard=args.logger.tensorboard,
@@ -253,10 +300,19 @@ def train_model(args, device=None, finalize_logs=False):
         linear_eval(args)
 
     completed_log_dir = finalize_log_dir(args) if finalize_logs else args.log_dir
+    selected_subset_indices_path = getattr(args, "selected_subset_indices_path", None)
+    if finalize_logs:
+        selected_subset_indices_path = _selected_indices_path_after_finalize(
+            selected_subset_indices_path,
+            completed_log_dir,
+        )
+        vars(args)["selected_subset_indices_path"] = selected_subset_indices_path
     return {
         "model_path": model_path,
         "accuracy": accuracy,
         "log_dir": completed_log_dir,
+        "selected_subset_indices": getattr(args, "selected_subset_indices", None),
+        "selected_subset_indices_path": selected_subset_indices_path,
     }
 
 
