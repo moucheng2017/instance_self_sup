@@ -78,6 +78,41 @@ def test_extract_features_rejects_shuffling_loader():
         spectral.extract_features(TinyBackbone(), loader, device="cpu", n_samples=5)
 
 
+def test_extract_features_rejects_subset_random_sampler():
+    # A custom/subset random sampler is not RandomSampler by class name, so a
+    # name-based guard would miss it; the structural guard must still reject it.
+    dataset = TinyDataset(6)
+    sampler = torch.utils.data.SubsetRandomSampler([0, 1, 2, 3, 4, 5])
+    loader = torch.utils.data.DataLoader(dataset, batch_size=2, sampler=sampler)
+    with pytest.raises(ValueError, match="non-shuffling"):
+        spectral.extract_features(TinyBackbone(), loader, device="cpu", n_samples=5)
+
+
+def test_extract_features_rejects_weighted_random_sampler():
+    dataset = TinyDataset(6)
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=[1.0] * 6, num_samples=6, replacement=False
+    )
+    loader = torch.utils.data.DataLoader(dataset, batch_size=2, sampler=sampler)
+    with pytest.raises(ValueError, match="non-shuffling"):
+        spectral.extract_features(TinyBackbone(), loader, device="cpu", n_samples=5)
+
+
+def test_extract_features_accepts_sequential_loader():
+    # The legitimate non-shuffling case (shuffle=False -> SequentialSampler) must pass.
+    loader = torch.utils.data.DataLoader(TinyDataset(6), batch_size=2, shuffle=False)
+    F, labels = spectral.extract_features(TinyBackbone(), loader, device="cpu", n_samples=5)
+    assert F.shape == (5, 512)
+    assert labels.shape == (5,)
+
+
+def test_extract_features_warns_on_underfilled_pool(recwarn):
+    loader = torch.utils.data.DataLoader(TinyDataset(6), batch_size=2, shuffle=False)
+    F, _ = spectral.extract_features(TinyBackbone(), loader, device="cpu", n_samples=100)
+    assert F.shape[0] == 6
+    assert any("under-filled" in str(w.message) for w in recwarn.list)
+
+
 def test_build_diagnostics_loader_reuses_selected_indices(monkeypatch):
     monkeypatch.setattr(spectral, "get_dataset", lambda **kwargs: TinyDataset(6))
     monkeypatch.setattr(spectral, "get_aug", lambda **kwargs: None)

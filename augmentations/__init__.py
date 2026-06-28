@@ -17,6 +17,11 @@ def get_aug(name='simsiam', image_size=224, train=True, train_classifier=None):
         elif name == 'strong':
             augmentation = StrongTransform(image_size)
         elif name == 'pseudo_supervised_net':
+            # Kept for completeness/symmetry only. The pseudo_sup training path
+            # (main.build_train_loader) calls get_dataset(transform=None) and lets
+            # PseudoSupervisedDataset apply StrongTransform internally, so this branch
+            # is not exercised in practice; the train transform does not flow through
+            # get_aug for pseudo_supervised_net (see design.md §3.3).
             augmentation = StrongTransform(image_size)
         elif name == 'weak':
             augmentation = WeakTransform()

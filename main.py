@@ -17,11 +17,6 @@ from models import get_model
 from optimizers import LR_Scheduler, get_optimizer
 from tools import Logger, knn_monitor
 
-try:
-    from datasets.superimpose import SuperimposeSourcesDataset
-except ModuleNotFoundError:
-    SuperimposeSourcesDataset = None
-
 
 def maybe_data_parallel(model, args):
     use_data_parallel = getattr(args.train, "use_data_parallel", False)
@@ -87,36 +82,24 @@ def _check_nonempty_train_loader(dataset, args):
 def build_train_loader(args):
     subset_n, subset_seed = _subset_cfg(args)
 
-    if args.model.name in ("superimpose_net", "pseudo_supervised_net"):
+    if args.model.name == "pseudo_supervised_net":
         base_dataset = get_dataset(
             transform=None,
             train=True,
             **args.dataset_kwargs,
         )
         selected_indices = select_subset_indices(len(base_dataset), subset_n, subset_seed)
-        if args.model.name == "superimpose_net":
-            if SuperimposeSourcesDataset is None:
-                raise ImportError("datasets.superimpose is required for model.name='superimpose_net'.")
-            dataset = SuperimposeSourcesDataset(
-                dataset=base_dataset,
-                image_size=args.dataset.image_size,
-                source_pool_size=getattr(args.train, "source_pool_size", None),
-                augment_probability=getattr(args.train, "augment_probability", 1.0),
-                subset_seed=getattr(args.train, "source_subset_seed", 0),
-                samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
-            )
-        else:
-            dataset = PseudoSupervisedDataset(
-                dataset=base_dataset,
-                image_size=args.dataset.image_size,
-                source_pool_size=None if selected_indices is not None else getattr(args.train, "source_pool_size", None),
-                augment_probability=getattr(args.train, "augment_probability", 1.0),
-                subset_seed=getattr(args.train, "source_subset_seed", 0),
-                samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
-                batch_size=args.train.batch_size,
-                negatives_ratio=getattr(args.train, "negatives_ratio", None),
-                explicit_indices=selected_indices,
-            )
+        dataset = PseudoSupervisedDataset(
+            dataset=base_dataset,
+            image_size=args.dataset.image_size,
+            source_pool_size=None if selected_indices is not None else getattr(args.train, "source_pool_size", None),
+            augment_probability=getattr(args.train, "augment_probability", 1.0),
+            subset_seed=getattr(args.train, "source_subset_seed", 0),
+            samples_per_epoch=getattr(args.train, "samples_per_epoch", None),
+            batch_size=args.train.batch_size,
+            negatives_ratio=getattr(args.train, "negatives_ratio", None),
+            explicit_indices=selected_indices,
+        )
         _save_selected_indices(args, selected_indices)
         _check_nonempty_train_loader(dataset, args)
         return torch.utils.data.DataLoader(

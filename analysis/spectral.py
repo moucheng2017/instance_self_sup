@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import torch
 import torch.nn.functional as torch_F
@@ -69,14 +71,47 @@ def knn_eval(F, labels, k=20, n_train=None):
     return float((preds == test_labels).float().mean().item())
 
 
+def _sampler_is_sequential(sampler):
+    """A non-shuffling DataLoader uses SequentialSampler (the default for shuffle=False).
+
+    We accept that exact type only; any other sampler (RandomSampler, SubsetRandomSampler,
+    WeightedRandomSampler, or a third-party/custom sampler) is treated as potentially
+    shuffling and therefore unsafe for the diagnostics loader (design.md §3.4 / §3.5).
+    """
+    return isinstance(sampler, torch.utils.data.SequentialSampler)
+
+
 def _loader_is_shuffling(loader):
+    """Return True unless we can positively confirm the loader iterates in fixed order.
+
+    Structural (not name-based) check so a custom or subset random sampler cannot slip
+    past the non-shuffling guard. A loader is considered non-shuffling only when its
+    (batch_)sampler is a plain SequentialSampler. When a custom ``batch_sampler`` is
+    supplied, ``loader.sampler`` is a SequentialSampler placeholder, so we inspect the
+    batch_sampler's underlying sampler instead and require it to be sequential too.
+    """
+    batch_sampler = getattr(loader, "batch_sampler", None)
+    if batch_sampler is not None:
+        inner = getattr(batch_sampler, "sampler", None)
+        if inner is not None:
+            # Default BatchSampler wraps loader.sampler; require it to be sequential.
+            return not _sampler_is_sequential(inner)
+        # Custom batch_sampler with no inspectable inner sampler -> cannot confirm order.
+        if not isinstance(batch_sampler, torch.utils.data.BatchSampler):
+            return True
+
     sampler = getattr(loader, "sampler", None)
-    return sampler is not None and sampler.__class__.__name__ == "RandomSampler"
+    if sampler is None:
+        return False
+    return not _sampler_is_sequential(sampler)
 
 
 def extract_features(backbone, loader, device, n_samples=1000):
     if _loader_is_shuffling(loader):
-        raise ValueError("extract_features requires a non-shuffling loader.")
+        raise ValueError(
+            "extract_features requires a non-shuffling loader "
+            "(expected a SequentialSampler / shuffle=False)."
+        )
 
     backbone.eval()
     features = []
@@ -93,6 +128,17 @@ def extract_features(backbone, loader, device, n_samples=1000):
 
     F_out = torch.cat(features, dim=0)[:n_samples]
     labels_out = torch.cat(labels, dim=0)[:n_samples]
+    if F_out.shape[0] < n_samples:
+        # Defense-in-depth for the same-data invariant (design.md §3.4 / §3.5 item 2):
+        # the diagnostics loader is expected to be the shared N-pool, so a short matrix
+        # means the caller passed a mismatched loader/n_samples and the effective-rank /
+        # KNN split would be computed over the wrong set of images.
+        warnings.warn(
+            f"extract_features requested n_samples={n_samples} but the loader yielded "
+            f"only {F_out.shape[0]} samples; the feature matrix is under-filled. "
+            "Ensure the diagnostics loader covers the full N-pool.",
+            stacklevel=2,
+        )
     return F_out, labels_out
 
 
