@@ -119,6 +119,32 @@ def build_train_loader(args):
     )
     dataset, selected_indices = maybe_select_subset(base_dataset, subset_n, subset_seed)
     _save_selected_indices(args, selected_indices)
+
+    # Optional per-epoch sample budget. When set, oversample the (small) pool with
+    # replacement so the loader yields exactly `samples_per_epoch` items per epoch. This
+    # lets the two-view methods match the pseudo_supervised path's iteration count, so
+    # every method runs the same number of iterations per epoch at a given pool size.
+    # Default (None) preserves the original behaviour: one pass over the N-sample pool.
+    samples_per_epoch = getattr(args.train, "samples_per_epoch", None)
+    if samples_per_epoch is not None:
+        samples_per_epoch = int(samples_per_epoch)
+        if samples_per_epoch < 1:
+            raise ValueError("samples_per_epoch must be positive.")
+        if args.dataloader_kwargs.get("drop_last", False) and samples_per_epoch < args.train.batch_size:
+            raise ValueError(
+                "Training loader would be empty because samples_per_epoch is smaller than "
+                f"batch_size ({samples_per_epoch} < {args.train.batch_size}) with drop_last=True."
+            )
+        sampler = torch.utils.data.RandomSampler(
+            dataset, replacement=True, num_samples=samples_per_epoch
+        )
+        return torch.utils.data.DataLoader(
+            dataset=dataset,
+            sampler=sampler,
+            batch_size=args.train.batch_size,
+            **args.dataloader_kwargs,
+        )
+
     _check_nonempty_train_loader(dataset, args)
     return torch.utils.data.DataLoader(
         dataset=dataset,
