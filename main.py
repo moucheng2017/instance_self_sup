@@ -205,6 +205,21 @@ def build_optimizer_and_scheduler(model, train_loader, args):
     return optimizer, lr_scheduler
 
 
+def _wandb_config(args):
+    """Flatten the primitive config values into a dict for W&B run config."""
+    config = {"name": getattr(args, "name", None)}
+    for section in ("model", "train", "dataset"):
+        namespace = getattr(args, section, None)
+        if namespace is None:
+            continue
+        config[section] = {
+            key: value
+            for key, value in vars(namespace).items()
+            if isinstance(value, (int, float, str, bool, type(None)))
+        }
+    return config
+
+
 def save_checkpoint(model, epoch, args):
     model_path = os.path.join(
         args.ckpt_dir,
@@ -253,6 +268,11 @@ def train_model(args, device=None, finalize_logs=False):
         tensorboard=args.logger.tensorboard,
         matplotlib=args.logger.matplotlib,
         log_dir=args.log_dir,
+        wandb=getattr(args.logger, "wandb", False),
+        wandb_project=getattr(args.logger, "wandb_project", None),
+        wandb_entity=getattr(args.logger, "wandb_entity", None),
+        wandb_run_name=getattr(args, "name", None),
+        wandb_config=_wandb_config(args),
     )
 
     accuracy = 0.0
@@ -308,6 +328,7 @@ def train_model(args, device=None, finalize_logs=False):
         args.eval_from = model_path
         linear_eval(args)
 
+    logger.finish()
     completed_log_dir = finalize_log_dir(args) if finalize_logs else args.log_dir
     selected_subset_indices_path = getattr(args, "selected_subset_indices_path", None)
     if finalize_logs:

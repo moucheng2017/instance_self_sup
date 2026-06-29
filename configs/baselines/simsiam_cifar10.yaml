@@ -40,3 +40,6 @@ eval: false
 logger:
   tensorboard: false
   matplotlib: true
+  wandb: true            # on by default; logs training scalars to W&B
+  wandb_project: instance_self_sup
+  wandb_entity: null     # set to your W&B entity/team, or leave null
