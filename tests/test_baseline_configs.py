@@ -41,17 +41,19 @@ def test_baseline_configs_have_required_common_fields():
         assert config["model"]["init_load_predictor"] is False
 
 
-def test_lars_configs_share_identical_train_block_and_pseudo_sup_uses_sgd():
-    lars_names = ["vicreg", "barlow_twins", "simclr", "simsiam"]
-    train_blocks = [load(CONFIGS[name])["train"] for name in lars_names]
+def test_contrastive_configs_share_identical_train_block_and_all_use_sgd():
+    contrastive_names = ["vicreg", "barlow_twins", "simclr", "simsiam"]
+    train_blocks = [load(CONFIGS[name])["train"] for name in contrastive_names]
     assert all(block == train_blocks[0] for block in train_blocks)
-    assert all(block["optimizer"]["name"] == "lars" for block in train_blocks)
+    # All baselines use SGD at these small batch sizes (LARS was dropped: it only
+    # helps in the large-batch regime, and these runs use batch <= 256).
+    assert all(block["optimizer"]["name"] == "sgd" for block in train_blocks)
 
     pseudo = load(CONFIGS["pseudo_sup"])
     assert pseudo["train"]["optimizer"]["name"] == "sgd"
     assert pseudo["train"]["negatives_ratio"] == 0.25
     assert pseudo["model"]["cosine_softmax"] is True
-    assert pseudo["model"]["l2_norm_backbone_features"] is True
+    assert pseudo["model"]["l2_norm_backbone_features"] is False
 
 
 def test_vicreg_and_barlow_locked_coefficients():

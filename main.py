@@ -290,6 +290,9 @@ def train_model(args, device=None, finalize_logs=False):
             data_dict = forward_batch(model, batch, device)
             loss = data_dict["loss"].mean()
             loss.backward()
+            grad_clip = getattr(args.train, "grad_clip", None)
+            if grad_clip:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
             optimizer.step()
             lr_scheduler.step()
             data_dict.update({"lr": lr_scheduler.get_lr()})
