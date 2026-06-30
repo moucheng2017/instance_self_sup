@@ -74,14 +74,18 @@ def build_colab_args(
     debug=False,
     download=True,
     hide_progress=False,
+    data_dir=None,
 ):
-    paths = ensure_colab_dirs(
-        default_colab_paths(
-            project_name=project_name,
-            use_drive=use_drive,
-            drive_mount_point=drive_mount_point,
-        )
+    paths = default_colab_paths(
+        project_name=project_name,
+        use_drive=use_drive,
+        drive_mount_point=drive_mount_point,
     )
+    if data_dir is not None:
+        # Reuse a shared dataset folder (one CIFAR-10 copy across projects) instead of
+        # the per-project default `<project>/data`.
+        paths["data_dir"] = data_dir
+    paths = ensure_colab_dirs(paths)
     args = build_args(
         config_file=config_file,
         overrides=_merge_colab_defaults(overrides),
@@ -109,6 +113,7 @@ def train_from_colab(
     debug=False,
     download=True,
     hide_progress=False,
+    data_dir=None,
 ):
     args, paths = build_colab_args(
         config_file=config_file,
@@ -120,6 +125,7 @@ def train_from_colab(
         debug=debug,
         download=download,
         hide_progress=hide_progress,
+        data_dir=data_dir,
     )
     result = train_model(args=args, device=args.device, finalize_logs=True)
     result["paths"] = paths
