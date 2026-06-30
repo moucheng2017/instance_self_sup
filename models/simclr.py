@@ -43,11 +43,11 @@ class projection_MLP(nn.Module):
 
 class SimCLR(nn.Module):
 
-    def __init__(self, backbone=resnet50()):
+    def __init__(self, backbone=resnet50(), projector_dim=512):
         super().__init__()
         
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.output_dim)
+        self.projector = projection_MLP(backbone.output_dim, out_dim=projector_dim)
         self.encoder = nn.Sequential(
             self.backbone,
             self.projector

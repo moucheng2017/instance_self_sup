@@ -11,6 +11,7 @@ CONFIGS = {
     "barlow_twins": "configs/baselines/barlow_twins_cifar10.yaml",
     "simclr": "configs/baselines/simclr_cifar10.yaml",
     "simsiam": "configs/baselines/simsiam_cifar10.yaml",
+    "swav": "configs/baselines/swav_cifar10.yaml",
 }
 
 
@@ -26,6 +27,7 @@ def test_baseline_configs_have_required_common_fields():
         "barlow_twins": "barlow_twins",
         "simclr": "simclr",
         "simsiam": "simsiam",
+        "swav": "swav",
     }
     for key, path in CONFIGS.items():
         config = load(path)
@@ -42,7 +44,7 @@ def test_baseline_configs_have_required_common_fields():
 
 
 def test_contrastive_configs_share_identical_train_block_and_all_use_sgd():
-    contrastive_names = ["vicreg", "barlow_twins", "simclr", "simsiam"]
+    contrastive_names = ["vicreg", "barlow_twins", "simclr", "simsiam", "swav"]
     train_blocks = [load(CONFIGS[name])["train"] for name in contrastive_names]
     assert all(block == train_blocks[0] for block in train_blocks)
     # All baselines use SGD at these small batch sizes (LARS was dropped: it only
@@ -61,11 +63,11 @@ def test_vicreg_and_barlow_locked_coefficients():
     assert vicreg["sim_coeff"] == 25.0
     assert vicreg["std_coeff"] == 25.0
     assert vicreg["cov_coeff"] == 1.0
-    assert vicreg["expander_dim"] == 2048
+    assert vicreg["expander_dim"] == 512
 
     barlow = load(CONFIGS["barlow_twins"])["model"]
     assert barlow["lambd"] == 0.0051
-    assert barlow["projector_dim"] == 2048
+    assert barlow["projector_dim"] == 512
 
 
 def test_get_model_and_get_aug_resolve_all_baselines():

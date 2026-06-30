@@ -9,6 +9,7 @@ dataset:
 model:
   name: pseudo_supervised_net
   backbone: resnet18
+  projector_dim: 512
   # Single-episode native pseudo-supervised recipe. All five baselines use SGD at
   # these small batch sizes (LARS was dropped; it only helps in the large-batch regime).
   cosine_softmax: true

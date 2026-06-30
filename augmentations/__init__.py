@@ -12,7 +12,7 @@ def get_aug(name='simsiam', image_size=224, train=True, train_classifier=None):
             augmentation = SimSiamTransform(image_size)
         elif name == 'byol':
             augmentation = BYOL_transform(image_size)
-        elif name in ('simclr', 'vicreg', 'barlow_twins'):
+        elif name in ('simclr', 'vicreg', 'barlow_twins', 'swav'):
             augmentation = SimCLRTransform(image_size)
         elif name == 'strong':
             augmentation = StrongTransform(image_size)

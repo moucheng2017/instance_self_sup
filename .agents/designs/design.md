@@ -13,7 +13,7 @@
 This branch is responsible for:
 
 1. **Two new pretraining methods** — VICReg and Barlow Twins — that train from random init and plug into the existing `main.train_model` loop with no special-casing beyond model/aug registration.
-2. **A baseline suite of Colab notebooks** — one per compared method (`pseudo_sup`, VICReg, Barlow Twins, SimCLR, SimSiam) — that run the N-sweep and report the Section 2.1 metrics: effective rank of the penultimate-layer feature matrix, KNN accuracy (k=20), and the top-20 singular values. All five methods use SGD, held constant for parity so any spectral/KNN difference is attributable to the method, not the optimizer: all five methods share one identical SGD schedule (`base_lr` 0.05, `warmup_epochs` 10, weight decay 5e-4, `grad_clip` 1.0); `pseudo_sup` differs only in its model recipe (cosine-softmax / l2-norm / negatives-ratio), not the optimizer (see below and §3.6).
+2. **A baseline suite of Colab notebooks** — one per compared method (`pseudo_sup`, VICReg, Barlow Twins, SimCLR, SimSiam; **SwAV** was added later as a sixth baseline — see §3.2a) — that run the N-sweep and report the Section 2.1 metrics: effective rank of the penultimate-layer feature matrix, KNN accuracy (k=20), and the top-20 singular values. All five methods use SGD, held constant for parity so any spectral/KNN difference is attributable to the method, not the optimizer: all five methods share one identical SGD schedule (`base_lr` 0.05, `warmup_epochs` 10, weight decay 5e-4, `grad_clip` 1.0); `pseudo_sup` differs only in its model recipe (cosine-softmax / l2-norm / negatives-ratio), not the optimizer (see below and §3.6).
 3. **A checkpoint-initialization option** exposed by every notebook (and all five configs): start training from a saved checkpoint, loading the backbone by default and optionally the projector and predictor (§3.7). This is what enables idea.md's proposed "SimCLR + pseudo_sup init" method.
 
 SimCLR and SimSiam already exist (`models/simclr.py`, `models/simsiam.py`) and are reused as-is — do not reimplement or modify them; they only get new baseline configs and notebooks. `pseudo_sup` is the existing `pseudo_supervised_net`; it gets a baseline notebook that reproduces **one episode** of `notebooks/random-meta-cifar10-ssl.ipynb` (its native SGD pseudo-supervised recipe), trained on the same shared N-pool as the others so it stays directly comparable. The spectrum-surgery experiments (idea.md Section 2.2) are **out of scope** for this branch, but the spectral-diagnostics module built here is the shared foundation for them, so build it cleanly. STL-10 is **out of scope** for this branch (deferred to separate work); build CIFAR-10 only.
@@ -51,7 +51,7 @@ Read these files before writing code; the new methods must conform to the conven
 
 ### 3.1 `models/vicreg.py`
 
-A projector + VICReg loss. Follow the BN-MLP projector style already in `models/simsiam.py` (3 linear layers with BatchNorm; expander dim configurable, default 2048 for CIFAR — the paper's 8192 is overkill at this scale).
+A projector + VICReg loss. Follow the BN-MLP projector style already in `models/simsiam.py` (3 linear layers with BatchNorm; expander dim configurable, default 512 (matched across all five baselines) — the paper's 8192 is overkill at this scale).
 
 VICReg loss over two projected batches `z_a, z_b` of shape `[N, D]`:
 - **Invariance** `s = mse(z_a, z_b)`.
@@ -59,7 +59,7 @@ VICReg loss over two projected batches `z_a, z_b` of shape `[N, D]`:
 - **Covariance** `c(z) = sum_{i != j} Cov(z)_{ij}^2 / D`, where `Cov(z) = (z - z.mean(0)).T @ (z - z.mean(0)) / (N - 1)`. Apply to both.
 - **Total** `loss = sim_coeff * s + std_coeff * var_loss + cov_coeff * (c(z_a) + c(z_b))`, default coefficients `sim_coeff = 25.0`, `std_coeff = 25.0`, `cov_coeff = 1.0`.
 
-Return `{"loss": total, "inv_loss": s, "var_loss": ..., "cov_loss": ...}` so each term is logged. Make coefficients, expander dim, `eps`, and `gamma` constructor arguments read from `model_cfg` in `get_model` (use `getattr` with defaults, matching the `pseudo_supervised_net` pattern). **Locked defaults = the original-paper values (Bardes et al., 2022): `sim_coeff = 25.0`, `std_coeff = 25.0`, `cov_coeff = 1.0`, `gamma = 1.0`, `eps = 1e-4`.** The expander dimension is the one deliberate departure from the paper: use **2048** (a CIFAR-scale choice; the paper's 8192 is unnecessary and slow here) and note this in the config comment.
+Return `{"loss": total, "inv_loss": s, "var_loss": ..., "cov_loss": ...}` so each term is logged. Make coefficients, expander dim, `eps`, and `gamma` constructor arguments read from `model_cfg` in `get_model` (use `getattr` with defaults, matching the `pseudo_supervised_net` pattern). **Locked defaults = the original-paper values (Bardes et al., 2022): `sim_coeff = 25.0`, `std_coeff = 25.0`, `cov_coeff = 1.0`, `gamma = 1.0`, `eps = 1e-4`.** The expander dimension departs from the paper: use **512** (a small-data, low-overfitting choice that is also matched across all five baselines for fair comparison; the paper's 8192 is unnecessary here) and note this in the config comment.
 
 ### 3.2 `models/barlow_twins.py`
 
@@ -69,7 +69,27 @@ Projector + Barlow Twins loss over `z_a, z_b` of shape `[N, D]`:
 - **Loss** `= sum_i (1 - C_ii)^2 + lambd * sum_{i != j} C_ij^2`, default `lambd = 0.0051`. Do not name a Python parameter `lambda`; use `lambd` or `offdiag_coeff`.
 - Use a helper `off_diagonal(C)` to select off-diagonal elements.
 
-Return `{"loss": total, "on_diag": ..., "off_diag": ...}`. Projector: 3-layer BN-MLP, dim configurable, default **2048** (deliberate CIFAR-scale choice vs. the paper's 8192; note in config). `lambd` and projector dim come from `model_cfg`. **Locked default = the original-paper value (Zbontar et al., 2021): `lambd = 0.0051`.**
+Return `{"loss": total, "on_diag": ..., "off_diag": ...}`. Projector: 3-layer BN-MLP, dim configurable, default **512** (small-data choice vs. the paper's 8192, matched across all five baselines; note in config). `lambd` and projector dim come from `model_cfg`. **Locked default = the original-paper value (Zbontar et al., 2021): `lambd = 0.0051`.**
+
+### 3.2a `models/swav.py` — SwAV (added baseline)
+
+SwAV (Caron et al., 2020) was added as a sixth baseline after the original suite, kept directly
+comparable to the rest: same castrated `resnet18` backbone, the same **512-d** 3-layer BN-MLP projector,
+the same 2-view `SimCLRTransform` augmentation (no multi-crop), and the **byte-identical SGD train block**
+(`configs/baselines/swav_cifar10.yaml` shares the optimizer/schedule asserted in `tests/test_baseline_configs.py`).
+
+Implementation: projector → L2-normalized embedding → learnable unit-norm **prototypes**
+(`nn.Linear(projector_dim, num_prototypes, bias=False)`). Codes are produced online by **Sinkhorn-Knopp**
+(`sinkhorn_epsilon`, `sinkhorn_iters`) under `no_grad`; the loss is the **2-view swapped prediction**
+`-0.5·(⟨code₂, logsoftmax(s₁/τ)⟩ + ⟨code₁, logsoftmax(s₂/τ)⟩)`. Prototypes are re-normalized to unit norm
+each step, and the Sinkhorn equipartition constraint prevents collapse. `forward` returns
+`{loss, assign_entropy, proto_usage_entropy}` (the last two are logged collapse diagnostics).
+Hyperparameters come from `model_cfg` with defaults `num_prototypes=512`, `temperature=0.1`,
+`sinkhorn_epsilon=0.05`, `sinkhorn_iters=3`, `projector_dim=512`; `get_aug` maps `swav` → `SimCLRTransform`.
+
+Deliberate simplifications vs. full SwAV (documented, fine for a small-scale baseline): **two views only
+(no multi-crop), no feature queue, no prototype-freeze warmup**. Tested in `tests/test_swav.py`; notebook
+`notebooks/swav-cifar10-ssl.ipynb` (cloned from SimCLR, inherits the sweep / W&B / resume / diagnostics).
 
 ### 3.3 Augmentation registration
 
@@ -141,7 +161,7 @@ Add four CIFAR-10 configs under `configs/baselines/`: `vicreg_cifar10.yaml`, `ba
 - `train.subset_n: null`, `train.subset_seed: 42`.
 - `eval: false` — **linear-eval monitoring is OFF during all training runs** (decided). Linear eval, if wanted, is a separate post-training step (see §4) run on saved checkpoints after the go/no-go.
 
-**Differs per file:** only the `model` block. VICReg and Barlow Twins carry their locked paper coefficients and the **2048** projector/expander dim. SimCLR and SimSiam reference the existing models unchanged — do **not** alter their projector architectures (SimCLR's is 256-d, SimSiam's 2048-d by construction); just set `model.name` to `simclr`/`simsiam` and attach the shared `train`/`eval` blocks.
+**Differs per file:** only the `model` block. VICReg and Barlow Twins carry their locked paper coefficients and a **512** projector/expander dim. **All five methods use a 512-d projector** (`model.projector_dim`/`expander_dim` = 512 in every config) so the projector width is consistent across the suite — this revises the earlier decision to keep SimCLR's native 256-d and SimSiam's native 2048-d. SimCLR, SimSiam, and pseudo_sup were extended to read `model.projector_dim` (default 512), with their predictor/classifier dims following; their losses/forward passes are otherwise unchanged. Set `model.name` to `simclr`/`simsiam` and attach the shared `train`/`eval` blocks.
 
 **Fifth config — `pseudo_sup_cifar10.yaml` (single-episode reproduction; same SGD optimizer/schedule as the rest of the suite, differing only in its model recipe).** `model.name: pseudo_supervised_net`, backbone resnet18, reproducing one episode of `notebooks/random-meta-cifar10-ssl.ipynb`: carry the same single-episode settings the meta path uses (`model.cosine_softmax: true`, `model.l2_norm_backbone_features: false`, `train.negatives_ratio`, `train.augment_probability: 1.0`, and the shared SGD optimizer/schedule used across the suite — `sgd`, momentum `0.9`, weight decay `5e-4`, `warmup_epochs: 10`, `base_lr: 0.05`, `grad_clip: 1.0`). Use the plain `train_model` path (not `meta_train_model`) with `subset_n`/`subset_seed` + the `explicit_indices` wiring from §3.5 so it trains on the exact shared N-pool. **All five methods now use the same SGD optimizer and schedule** (LARS was dropped — see §2); `pseudo_sup` carries no optimizer asymmetry at all — its only distinctions are the model recipe (`cosine_softmax`, `l2_norm_backbone_features`) and dataset keys (`negatives_ratio`, `augment_probability`). Same `eval: false`, `knn_monitor: false`, `subset_seed: 42` as the rest. Document the asymmetry in a config comment.
 
@@ -236,7 +256,7 @@ Write tests **before** the corresponding implementation. Place them in `tests/`,
 **`tests/test_baseline_configs.py`**
 - All five YAMLs (`pseudo_sup`, `vicreg`, `barlow_twins`, `simclr`, `simsiam`) load and declare the expected `model.name`, `backbone: resnet18`, `train.subset_n`/`train.subset_seed`, `eval: false`, and the `model.init_checkpoint` (default null) + `init_load_*` keys.
 - The four contrastive configs (`vicreg`, `barlow_twins`, `simclr`, `simsiam`) declare `train.optimizer` name `sgd` and share an identical `train` optimizer/LR block — assert equality across the four so the SGD schedule is held constant for parity. The `pseudo_sup` config carries the same SGD optimizer/schedule (sgd, weight decay 5e-4, warmup 10, base_lr 0.05) and differs only in its model recipe — assert it declares `sgd` and carries `cosine_softmax`/`l2_norm_backbone_features`.
-- VICReg/Barlow Twins configs carry the locked paper coefficients (`sim/std/cov = 25/25/1`, `lambd = 0.0051`) and projector dim `2048`, of correct type.
+- VICReg/Barlow Twins configs carry the locked paper coefficients (`sim/std/cov = 25/25/1`, `lambd = 0.0051`) and projector dim `512`, of correct type.
 - `train.knn_monitor: false` in all five (or tests/documentation prove the monitor number is named separately from the Section 2.1 within-N KNN metric).
 - `get_model` builds each method from its config and `get_aug` resolves each `model.name` without raising.
 
@@ -281,7 +301,7 @@ These were open questions; the project owner has decided each. Treat as binding.
 - **Optimizer / baseline suite (revised):** build a single **SGD-based** baseline suite covering all five methods — all five (VICReg, Barlow Twins, SimCLR, SimSiam, and `pseudo_sup`) share one identical SGD optimizer/schedule (base_lr 0.05, weight decay 5e-4, warmup 10, grad_clip 1.0); `pseudo_sup` differs only in its model recipe, not the optimizer. **LARS was dropped** (it only helps at large batch; these runs use batch ≤256, where it gave no benefit and diverged), giving full optimizer parity across all five at small batch. SimCLR/SimSiam reuse their existing models (config + notebook only, no model edits). (§2, §3.6, §4)
 - **`pseudo_sup` in the suite:** add a fifth notebook/config that reproduces **one episode** of `notebooks/random-meta-cifar10-ssl.ipynb` via the plain `train_model` path on the shared N-pool. It uses the **same SGD optimizer and schedule** as the rest of the suite (all five baselines share `sgd` / base_lr 0.05 / weight decay 5e-4 / warmup 10 / grad_clip 1.0); the only remaining asymmetry is `pseudo_sup`'s model recipe — cosine-softmax, l2-norm, and the negatives-ratio dataset — not the optimizer. (§3.6, §4)
 - **Checkpoint initialization (all methods):** every notebook/config can warm-start from a saved checkpoint, loading the **backbone by default** and **optionally the projector and predictor** (§3.7). This enables idea.md's "SimCLR + pseudo_sup init" proposed method. Requested-but-unloadable submodules error rather than silently skip. (§2, §3.7, §4)
-- **Projector/expander dimension:** **2048** for the new VICReg/Barlow Twins models. SimCLR/SimSiam keep their existing architecture dims unchanged. (§3.1, §3.2, §3.6)
+- **Projector/expander dimension (revised):** **512** across all five models (`projector_dim`/`expander_dim` = 512 in every config) for a consistent projector width and fair comparison. SimCLR, SimSiam, and pseudo_sup were extended to read `model.projector_dim` (default 512); their predictor/classifier dims follow. This supersedes the original 2048 (VICReg/Barlow) + native-dims (SimCLR 256-d / SimSiam 2048-d) decision. (§3.1, §3.2, §3.6)
 - **Linear eval:** **off for all training runs** (`eval: false`) to save compute; run linear eval only as a separate post-training step on saved checkpoints. (§3.6, §4)
 - **STL-10:** **out of scope** for this branch (deferred to other work). CIFAR-10 only. (§1, §3.6)
-- **Reference hyperparameters:** use the **original-paper values** as defaults — VICReg `25/25/1` (two variance terms averaged, `gamma=1`, `eps=1e-4`), Barlow Twins `lambd = 0.0051`. The 2048 projector dim is the only intentional departure (a CIFAR-scale choice). (§3.1, §3.2)
+- **Reference hyperparameters:** use the **original-paper values** as defaults — VICReg `25/25/1` (two variance terms averaged, `gamma=1`, `eps=1e-4`), Barlow Twins `lambd = 0.0051`. The 512 projector dim (shared across all five baselines) is the intentional departure (a small-data, consistency choice). (§3.1, §3.2)

@@ -4,6 +4,7 @@ from .simclr import SimCLR
 from .barlow_twins import BarlowTwins
 from .pseudo_supervised_net import PseudoSupervisedNet
 from .vicreg import VICReg
+from .swav import SwAV
 from torchvision.models import resnet50, resnet18
 import torch
 from .backbones import resnet18_cifar_variant1, resnet18_cifar_variant2
@@ -21,18 +22,27 @@ def get_backbone(backbone, castrate=True):
 def get_model(model_cfg, num_classes=None):
 
     if model_cfg.name == 'simsiam':
-        model =  SimSiam(get_backbone(model_cfg.backbone))
+        model =  SimSiam(get_backbone(model_cfg.backbone), projector_dim=getattr(model_cfg, "projector_dim", 512))
         if getattr(model_cfg, "proj_layers", None) is not None:
             model.projector.set_layers(model_cfg.proj_layers)
 
     elif model_cfg.name == 'byol':
         model = BYOL(get_backbone(model_cfg.backbone))
     elif model_cfg.name == 'simclr':
-        model = SimCLR(get_backbone(model_cfg.backbone))
+        model = SimCLR(get_backbone(model_cfg.backbone), projector_dim=getattr(model_cfg, "projector_dim", 512))
+    elif model_cfg.name == 'swav':
+        model = SwAV(
+            get_backbone(model_cfg.backbone),
+            projector_dim=getattr(model_cfg, "projector_dim", 512),
+            num_prototypes=getattr(model_cfg, "num_prototypes", 512),
+            temperature=getattr(model_cfg, "temperature", 0.1),
+            sinkhorn_epsilon=getattr(model_cfg, "sinkhorn_epsilon", 0.05),
+            sinkhorn_iters=getattr(model_cfg, "sinkhorn_iters", 3),
+        )
     elif model_cfg.name == 'vicreg':
         model = VICReg(
             get_backbone(model_cfg.backbone),
-            expander_dim=getattr(model_cfg, "expander_dim", 2048),
+            expander_dim=getattr(model_cfg, "expander_dim", 512),
             sim_coeff=getattr(model_cfg, "sim_coeff", 25.0),
             std_coeff=getattr(model_cfg, "std_coeff", 25.0),
             cov_coeff=getattr(model_cfg, "cov_coeff", 1.0),
@@ -42,7 +52,7 @@ def get_model(model_cfg, num_classes=None):
     elif model_cfg.name == 'barlow_twins':
         model = BarlowTwins(
             get_backbone(model_cfg.backbone),
-            projector_dim=getattr(model_cfg, "projector_dim", 2048),
+            projector_dim=getattr(model_cfg, "projector_dim", 512),
             lambd=getattr(model_cfg, "lambd", 0.0051),
             eps=getattr(model_cfg, "eps", 1e-4),
         )
@@ -53,6 +63,7 @@ def get_model(model_cfg, num_classes=None):
             l2_normalize=getattr(model_cfg, "l2_norm_backbone_features", False),
             cosine_softmax=getattr(model_cfg, "cosine_softmax", False),
             cosine_scale=getattr(model_cfg, "cosine_scale", 16.0),
+            projector_dim=getattr(model_cfg, "projector_dim", 512),
         )
     else:
         raise NotImplementedError

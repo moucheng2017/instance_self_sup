@@ -8,6 +8,7 @@ NOTEBOOKS = {
     "barlow_twins": ("notebooks/barlow-twins-cifar10-ssl.ipynb", "configs/baselines/barlow_twins_cifar10.yaml"),
     "simclr": ("notebooks/simclr-cifar10-ssl.ipynb", "configs/baselines/simclr_cifar10.yaml"),
     "simsiam": ("notebooks/simsiam-cifar10-ssl.ipynb", "configs/baselines/simsiam_cifar10.yaml"),
+    "swav": ("notebooks/swav-cifar10-ssl.ipynb", "configs/baselines/swav_cifar10.yaml"),
 }
 
 

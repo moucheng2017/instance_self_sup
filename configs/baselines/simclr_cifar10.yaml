@@ -9,6 +9,7 @@ dataset:
 model:
   name: simclr
   backbone: resnet18
+  projector_dim: 512
   init_checkpoint: null
   init_load_backbone: true
   init_load_projector: false

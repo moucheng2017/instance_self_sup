@@ -10,7 +10,7 @@ model:
   name: vicreg
   backbone: resnet18
   # CIFAR-scale projector; original VICReg used 8192 on larger images.
-  expander_dim: 2048
+  expander_dim: 512
   sim_coeff: 25.0
   std_coeff: 25.0
   cov_coeff: 1.0

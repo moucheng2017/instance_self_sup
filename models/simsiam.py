@@ -87,17 +87,17 @@ class prediction_MLP(nn.Module):
         return x 
 
 class SimSiam(nn.Module):
-    def __init__(self, backbone=resnet50()):
+    def __init__(self, backbone=resnet50(), projector_dim=512):
         super().__init__()
         
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.output_dim)
+        self.projector = projection_MLP(backbone.output_dim, hidden_dim=projector_dim, out_dim=projector_dim)
 
         self.encoder = nn.Sequential( # f encoder
             self.backbone,
             self.projector
         )
-        self.predictor = prediction_MLP()
+        self.predictor = prediction_MLP(in_dim=projector_dim, hidden_dim=max(projector_dim // 4, 1), out_dim=projector_dim)
     
     def forward(self, x1, x2):
 

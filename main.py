@@ -220,22 +220,49 @@ def _wandb_config(args):
     return config
 
 
-def save_checkpoint(model, epoch, args):
+def save_checkpoint(model, epoch, args, optimizer=None):
     model_path = os.path.join(
         args.ckpt_dir,
         f"{args.name}_epoch{epoch + 1}_{datetime.now().strftime('%m%d%H%M%S')}.pth",
     )
-    torch.save(
-        {
-            "epoch": epoch + 1,
-            "state_dict": unwrap_model(model).state_dict(),
-        },
-        model_path,
-    )
+    payload = {
+        "epoch": epoch + 1,
+        "state_dict": unwrap_model(model).state_dict(),
+    }
+    # Optimizer state lets a checkpoint be *resumed* (not just warm-started). Optional
+    # so existing callers (and the meta loop) keep working unchanged.
+    if optimizer is not None:
+        payload["optimizer"] = optimizer.state_dict()
+    torch.save(payload, model_path)
     print(f"Model saved to {model_path}")
     with open(os.path.join(args.log_dir, "checkpoint_path.txt"), "a") as f:
         f.write(f"{model_path}\n")
     return model_path
+
+
+def resume_training_state(model, optimizer, lr_scheduler, checkpoint_path, iters_per_epoch, device):
+    """Restore model + optimizer + LR-schedule position from a checkpoint.
+
+    Returns the epoch to resume from (the loop should run ``range(start_epoch, stop_at_epoch)``).
+    If the checkpoint has no optimizer state (older format), the weights are restored but the
+    optimizer is left fresh.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    unwrap_model(model).load_state_dict(checkpoint["state_dict"])
+    start_epoch = int(checkpoint.get("epoch", 0))
+    if checkpoint.get("optimizer") is not None:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        # Move optimizer state tensors (e.g. SGD momentum buffers) onto the model's device.
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device)
+    else:
+        print("[resume] checkpoint has no optimizer state; restoring weights only (optimizer reset).")
+    # Fast-forward the precomputed LR schedule to where training left off.
+    lr_scheduler.iter = min(start_epoch * iters_per_epoch, len(lr_scheduler.lr_schedule) - 1)
+    print(f"[resume] resumed from {checkpoint_path} at epoch {start_epoch}.")
+    return start_epoch
 
 
 def finalize_log_dir(args):
@@ -264,6 +291,16 @@ def train_model(args, device=None, finalize_logs=False):
         )
     model = maybe_data_parallel(raw_model.to(device), args)
     optimizer, lr_scheduler = build_optimizer_and_scheduler(model, train_loader, args)
+
+    # Optional resume: continue an interrupted run from its last checkpoint (restores
+    # model + optimizer + LR-schedule position and starts from the saved epoch).
+    start_epoch = 0
+    resume_checkpoint = getattr(args.train, "resume_checkpoint", None)
+    if resume_checkpoint:
+        start_epoch = resume_training_state(
+            model, optimizer, lr_scheduler, resume_checkpoint, len(train_loader), device
+        )
+
     logger = Logger(
         tensorboard=args.logger.tensorboard,
         matplotlib=args.logger.matplotlib,
@@ -277,7 +314,7 @@ def train_model(args, device=None, finalize_logs=False):
 
     accuracy = 0.0
     last_intermediate_ckpt = None
-    global_progress = tqdm(range(0, args.train.stop_at_epoch), desc="Training")
+    global_progress = tqdm(range(start_epoch, args.train.stop_at_epoch), desc="Training")
     for epoch in global_progress:
         model.train()
         local_progress = tqdm(
@@ -312,7 +349,7 @@ def train_model(args, device=None, finalize_logs=False):
 
         saving_freq = getattr(args.train, "saving_frequency", None)
         if saving_freq and (epoch + 1) % saving_freq == 0:
-            last_intermediate_ckpt = save_checkpoint(model, epoch, args)
+            last_intermediate_ckpt = save_checkpoint(model, epoch, args, optimizer=optimizer)
         else:
             last_intermediate_ckpt = None
 
@@ -322,10 +359,13 @@ def train_model(args, device=None, finalize_logs=False):
 
     # Save final checkpoint unless the last epoch was already saved by saving_frequency.
     saving_freq = getattr(args.train, "saving_frequency", None)
-    if saving_freq and args.train.stop_at_epoch % saving_freq == 0:
+    if start_epoch >= args.train.stop_at_epoch:
+        # Resumed an already-complete run: no epochs ran, so reuse the resume checkpoint.
+        model_path = resume_checkpoint
+    elif saving_freq and args.train.stop_at_epoch % saving_freq == 0:
         model_path = last_intermediate_ckpt
     else:
-        model_path = save_checkpoint(model, epoch, args)
+        model_path = save_checkpoint(model, epoch, args, optimizer=optimizer)
 
     if args.eval is not False:
         args.eval_from = model_path

@@ -9,6 +9,7 @@ dataset:
 model:
   name: simsiam
   backbone: resnet18
+  projector_dim: 512
   proj_layers: null
   init_checkpoint: null
   init_load_backbone: true

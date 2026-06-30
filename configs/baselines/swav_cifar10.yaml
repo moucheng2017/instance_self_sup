@@ -1,4 +1,4 @@
-name: barlow-twins-cifar10-baseline
+name: swav-cifar10-baseline
 seed: 42
 
 dataset:
@@ -7,12 +7,14 @@ dataset:
   num_workers: 0
 
 model:
-  name: barlow_twins
+  name: swav
   backbone: resnet18
-  # CIFAR-scale projector; original Barlow Twins used 8192 on larger images.
   projector_dim: 512
-  lambd: 0.0051
-  eps: 0.0001
+  # SwAV-specific hyperparameters (2-view swapped prediction, no multi-crop, for parity).
+  num_prototypes: 512
+  temperature: 0.1
+  sinkhorn_epsilon: 0.05
+  sinkhorn_iters: 3
   init_checkpoint: null
   init_load_backbone: true
   init_load_projector: false

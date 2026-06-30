@@ -11,6 +11,7 @@ class PseudoSupervisedNet(nn.Module):
         l2_normalize=False,
         cosine_softmax=False,
         cosine_scale=16.0,
+        projector_dim=512,
     ):
         super().__init__()
         if num_classes is None or int(num_classes) < 1:
@@ -23,13 +24,14 @@ class PseudoSupervisedNet(nn.Module):
         self.l2_norm = bool(l2_normalize)
         self.cosine_softmax = bool(cosine_softmax)
         self.cosine_scale = float(cosine_scale)
-        self.proj = projection_MLP(backbone.output_dim, hidden_dim=2048, out_dim=2048)
+        self.proj = projection_MLP(backbone.output_dim, hidden_dim=projector_dim, out_dim=projector_dim)
 
+        pred_hidden = max(projector_dim // 4, 1)
         if self.cosine_softmax:
-            self.pred = prediction_MLP(2048, hidden_dim=512, out_dim=2048)
-            self.classifier = nn.Linear(2048, self.num_classes, bias=False)
+            self.pred = prediction_MLP(projector_dim, hidden_dim=pred_hidden, out_dim=projector_dim)
+            self.classifier = nn.Linear(projector_dim, self.num_classes, bias=False)
         else:
-            self.pred = prediction_MLP(2048, hidden_dim=512, out_dim=self.num_classes)
+            self.pred = prediction_MLP(projector_dim, hidden_dim=pred_hidden, out_dim=self.num_classes)
             self.classifier = None
 
     def forward(self, images, pseudo_labels):
